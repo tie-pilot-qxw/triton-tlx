@@ -37,6 +37,11 @@ namespace ttg = mlir::triton::gpu;
 // Toggle this to work around Cooperative Grid Launch ld.acquire optimized path
 static constexpr bool disableLDAcquireLowering = false;
 
+// facebook begin T202302995
+using ::mlir::LLVM::getSharedMemoryBase;
+#include "triton/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.h"
+// facebook end T202302995
+
 namespace {
 
 llvm::MapVector<StringAttr, int32_t> getAllFreeVarMasks(MLIRContext *ctx) {
@@ -716,6 +721,9 @@ struct AtomicRMWOpConversion
     return opType == RMWOp::FADD &&
            (elementType.isF16() || elementType.isBF16() || elementType.isF32());
   }
+  // facebook begin T202302995
+  #include "FB_AtomicBF16_OpToLLVM.h"
+  // facebook end T202302995
 
   bool isPromotableToNVPTXLD(triton::AtomicRMWOp op) const {
     if (disableLDAcquireLowering)
@@ -790,6 +798,24 @@ struct AtomicRMWOpConversion
     Type valueElemTy =
         tensorTy ? getTypeConverter()->convertType(tensorTy.getElementType())
                  : valueTy;
+
+    // facebook begin T202302995
+    bool isHopper = false;
+    if (valueElemTy.isBF16()) {
+      const int compute_capability = moduleOp->hasAttr(triton::AttrTargetName) ?
+                                     getNVIDIAComputeCapability(moduleOp) : -1;
+      isHopper = compute_capability >= 90;
+      if (atomicRmwAttr == RMWOp::FADD && valueElemTy && !isHopper) {
+        if (valElements.size() && !valElements[0].getType().isBF16()) {
+          assert(false && "atom.add.bf16 fallback requires bf16 stored elements");
+          return failure();
+        } else {
+          return matchAndRewrite_NOPTX(op, adaptor, targetInfo, rewriter);
+        }
+      }
+    }
+    // facebook end T202302995
+
     const size_t valueElemNBits = valueElemTy.getIntOrFloatBitWidth();
     auto elemsPerThread = getTotalElemsPerThread(val.getType());
     // packed: e.g. packed=2 for f16x2
@@ -940,6 +966,12 @@ struct AtomicRMWOpConversion
         rmwOp = "add";
         rmwOp += (valueElemNBits == 16 ? ".noftz" : "");
         sTy = "f" + sBits;
+
+        // facebook begin T202302995
+        if (isHopper && valueElemTy.isBF16())
+          sTy = "bf" + sBits;
+        // facebook end T202302995
+
         sTy += (packed == 2 && valueElemNBits == 16) ? "x2" : "";
         break;
       case RMWOp::MAX:
