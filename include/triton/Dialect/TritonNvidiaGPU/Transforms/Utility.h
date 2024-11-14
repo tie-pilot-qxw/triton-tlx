@@ -24,11 +24,6 @@ void addAsyncTaskIds(Operation *op, ArrayRef<int> asyncTasks);
 void removeAsyncTaskId(Operation *op, AsyncTaskId asyncTaskId);
 void removeAsyncTaskIds(Operation *op);
 
-static Value GetCanonicalWarpId(RewriterBase &rewriter, Location loc) {
-  return rewriter.create<triton::nvgpu::CanonicalWarpIdOp>(
-      loc, rewriter.getI32Type());
-}
-
 class OpBuilderWithAsyncTaskIds : public OpBuilder {
 public:
   OpBuilderWithAsyncTaskIds(MLIRContext *context) : OpBuilder(context) {}

@@ -42,7 +42,9 @@ struct GetCanonicalWarpIdConversion
   matchAndRewrite(triton::nvidia_gpu::GetCanonicalWarpIdOp op,
                   OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    rewriter.replaceOp(op, GetCanonicalWarpId(rewriter, op->getLoc()));
+    auto warpIdOp = rewriter.create<triton::nvgpu::CanonicalWarpIdOp>(
+        op->getLoc(), rewriter.getI32Type());
+    rewriter.replaceOp(op, warpIdOp);
     return success();
   }
 };
