@@ -13,6 +13,8 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonNvidiaGPU/Transforms/Utility.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/SmallVector.h"
 
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
@@ -370,8 +372,18 @@ private:
         // range.
         auto *op = opScratchIter.first;
         auto *buffer = opScratchIter.second;
-        bufferRange.insert({buffer, Interval(operationId.lookup(op),
-                                             operationId.lookup(op) + 1)});
+        // Extend live range when asyncTaskId is not empty (i.e when we have
+        // warp spec).
+        if (getAsyncTaskIds(op).empty()) {
+          bufferRange.insert({buffer, Interval(operationId.lookup(op),
+                                               operationId.lookup(op) + 1)});
+        } else {
+          // FIXME: This range makes scratch buffers used in warp-specialized
+          // regions conflict with everything else in the program, which is
+          // too conservative, but safe.  A better approach would make them
+          // conflict with buffers live in other warp-specialized regions.
+          bufferRange.insert({buffer, Interval<size_t>(0, operationId.size())});
+        }
       }
     };
     processScratchMemory(allocation->opScratch);
@@ -408,6 +420,11 @@ private:
       auto maxId = std::numeric_limits<size_t>::min();
       std::for_each(liveOperations.begin(), liveOperations.end(),
                     [&](Operation *liveOp) {
+                      if (!getAsyncTaskIds(liveOp).empty()) {
+                        minId = 0;
+                        maxId = operationId.size();
+                        return;
+                      }
                       if (operationId[liveOp] < minId) {
                         minId = operationId[liveOp];
                       }
