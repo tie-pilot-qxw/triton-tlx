@@ -482,9 +482,31 @@ Operation *sliceOp(Operation *op, int offset,
     DenseMap<int, int> newArgIdices;
     for (unsigned i = 0; i < forOp.getInitArgs().size(); i++) {
       auto initArg = forOp.getInitArgs()[i];
-      auto newInitArgOp = sliceOp(initArg.getDefiningOp(), offset, builder,
-                                  mappings, reverseMappings, partitionScheme);
-      auto newInitArg = newInitArgOp->getResult(0);
+      Value newInitArg;
+      auto newInitArgOp = sliceOp(initArg, offset, builder, mappings,
+                                  reverseMappings, partitionScheme);
+      if (auto bbArg = dyn_cast<BlockArgument>(initArg)) {
+        // find the corresponding new block argument
+        Block *parentBlock = bbArg.getOwner();
+        unsigned argIndex = parentBlock->getNumArguments();
+        for (unsigned i = 0; i < parentBlock->getNumArguments(); ++i) {
+          if (parentBlock->getArgument(i) == bbArg) {
+            argIndex = i;
+            break;
+          }
+        }
+        assert(argIndex < parentBlock->getNumArguments() &&
+               "new init argment not found");
+        Region *parentRegion = parentBlock->getParent();
+        Region &newParentRegion =
+            newInitArgOp->getRegion(parentRegion->getRegionNumber());
+        newInitArg = parentRegion->getArgument(argIndex);
+      } else {
+        auto initArgOp = initArg.getDefiningOp();
+        unsigned resultIndex = cast<mlir::OpResult>(initArg).getResultNumber();
+        newInitArg = newInitArgOp->getResult(resultIndex);
+      }
+
       if (newInitArg != initArg) {
         newLoopArgs.append({newInitArg});
         forOp.getBody()->insertArgument(forOp.getBody()->getNumArguments(),
@@ -591,6 +613,10 @@ void partitionTasks(triton::FuncOp &funcOp) {
     }
 
     // clean up
+    LLVM_DEBUG({
+      LDBG("prior to clean up:");
+      funcOp.dump();
+    });
     SmallVector<Operation *> opsToDelete;
     for (auto op : partitionScheme.ops) {
       if (op->hasAttr("to_be_removed"))
