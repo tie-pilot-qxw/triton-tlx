@@ -598,6 +598,14 @@ getTaskTopRegion(triton::FuncOp funcOp,
         asyncTaskOps.push_back(op);
     }
   }
+
+  LLVM_DEBUG({
+    LDBG("\nTop Task Bodies");
+    for (auto op : asyncTaskOps) {
+      LDBG("\nTash Body:");
+      op->dump();
+    }
+  });
   return asyncTaskOps;
 }
 

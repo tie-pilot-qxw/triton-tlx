@@ -51,8 +51,7 @@ static bool oneVecCoversTheOther(SmallVector<AsyncTaskId> &one,
 }
 
 // Make sure the def chain contains the right taskId.
-bool fixTaskId(triton::FuncOp &funcOp) {
-  bool retCode = true;
+void fixTaskId(triton::FuncOp &funcOp) {
   funcOp.walk([&](Operation *op) {
     auto asyncTaskIds = getAsyncTaskIds(op);
     for (Value operand : op->getOperands()) {
@@ -66,14 +65,28 @@ bool fixTaskId(triton::FuncOp &funcOp) {
       // Make sure defTaskIds cover asyncTaskIds. Call addAsyncTaskIds if
       // necessary.
       if (!oneVecCoversTheOther(defTaskIds, asyncTaskIds)) {
-        retCode = false;
         // Const ops with same value but different task ids can be folded.
         if (isa<arith::ConstantIntOp>(defOp)) {
           LLVM_DEBUG({
-            LDBG("fixing taskId for");
+            LDBG("backward fixing taskId for");
             defOp->dump();
           });
           addAsyncTaskIds(defOp, asyncTaskIds);
+          LLVM_DEBUG({
+            LDBG("resulting");
+            defOp->dump();
+          });
+        } 
+      }
+      if (operand.hasOneUse() &&
+          !oneVecCoversTheOther(asyncTaskIds, defTaskIds)) {
+        // YieldOp may lose task attribute during MLIR canonicalization.
+        if (isa<scf::YieldOp>(op)) {
+          LLVM_DEBUG({
+            LDBG("forward fixing taskId for");
+            defOp->dump();
+          });
+          addAsyncTaskIds(op, defTaskIds);
           LLVM_DEBUG({
             LDBG("resulting");
             defOp->dump();
@@ -82,7 +95,6 @@ bool fixTaskId(triton::FuncOp &funcOp) {
       }
     }
   });
-  return retCode;
 }
 
 static SmallVector<int64_t> getShape(Value v) {
