@@ -53,6 +53,16 @@ std::pair<int, bool> scanRegUsage(ArrayRef<Operation *> opList,
   }
 }
 
+unsigned getNumBuffersOrDefault(scf::ForOp forOp, unsigned numBuffers) {
+  // Use the attribute attached to the loop if it exists otherwise use the
+  // global control.
+  if (!forOp->hasAttr(mlir::triton::kNumStagesAttrName))
+    return numBuffers;
+  return mlir::cast<IntegerAttr>(
+             forOp->getAttr(mlir::triton::kNumStagesAttrName))
+      .getInt();
+}
+
 // Create IfOp for each ayncTaskId.
 DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
                                                   int regDecProducer,
@@ -211,9 +221,9 @@ public:
   using Relation = std::pair<int, SmallVector<int>>;
 
   Channel(int producer, SmallVector<int> &consumers, Operation *src,
-          Operation *dst, Value srcOperand)
+          Operation *dst, Value srcOperand, unsigned numBuffers)
       : relation(producer, consumers), srcOp(src), dstOp(dst),
-        srcOperand(srcOperand) {}
+        srcOperand(srcOperand), numBuffers(numBuffers) {}
 
   bool operator==(const Channel &c) {
     return relation == c.relation && srcOp == c.srcOp && dstOp == c.dstOp;
@@ -223,13 +233,14 @@ public:
   Operation *srcOp;
   Operation *dstOp;
   Value srcOperand;
+  unsigned numBuffers;
 };
 
 // Loads will be in producer warp groups. For now, we only allow a single
 // warp group/task for a producer. For each LoadOp, create a channel from it
 // to any direct user which belongs to a different taskId.
 void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
-                          triton::FuncOp &funcOp) {
+                          triton::FuncOp &funcOp, unsigned numBuffers) {
   funcOp.walk([&](Operation *op) {
     if (isa<tt::LoadOp, tt::ExperimentalDescriptorLoadOp>(op)) {
       auto producerTaskIds = getAsyncTaskIds(op);
@@ -242,6 +253,10 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
         return;
       }
       auto producerTaskId = producerTaskIds.front();
+      unsigned producerNumBuffers = numBuffers;
+      if (auto forOp = op->getParentOfType<scf::ForOp>()) {
+        producerNumBuffers = getNumBuffersOrDefault(forOp, numBuffers);
+      }
 
       for (auto result : op->getResults()) {
         if (result.use_empty()) {
@@ -257,8 +272,9 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
           consumerTaskIds.erase(iter, consumerTaskIds.end());
           // Add a channel from the single producer task to consumerTaskIds.
           if (consumerTaskIds.size() > 0) {
-            channels.push_back(std::make_unique<Channel>(
-                producerTaskId, consumerTaskIds, op, userOp, result));
+            channels.push_back(
+                std::make_unique<Channel>(producerTaskId, consumerTaskIds, op,
+                                          userOp, result, producerNumBuffers));
           }
         }
       }
@@ -273,6 +289,7 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
       for (auto &asyncTaskId : channel->relation.second)
         LDBG("consumer: " << asyncTaskId);
       channel->dstOp->dump();
+      LDBG("numBuffers: " << channel->numBuffers);
     }
   });
 }
@@ -585,7 +602,8 @@ getTaskTopRegion(triton::FuncOp funcOp,
 
 // For ForOps in taskTopOps, create new ForOp for each by adding phase,
 // bufferIdx to the arguments.
-void appendBufferIdxArgs(SmallVector<Operation *> &taskTopOps, int numBuffers) {
+void appendBufferIdxArgs(SmallVector<Operation *> &taskTopOps,
+                         unsigned numBuffers) {
   SmallVector<scf::ForOp> orderedForOps;
   for (auto &op : taskTopOps) {
     op->walk<WalkOrder::PreOrder>([&](Operation *subOp) {
@@ -599,7 +617,8 @@ void appendBufferIdxArgs(SmallVector<Operation *> &taskTopOps, int numBuffers) {
     scf::ForOp parentForOp = origForOp->getParentOfType<scf::ForOp>();
     scf::ForOp newForOp;
     // for(...) -> for(..., phase, bufferIdx)
-    newForOp = createNewLoop(origForOp, numBuffers, parentForOp);
+    unsigned loopNumBuffers = getNumBuffersOrDefault(origForOp, numBuffers);
+    newForOp = createNewLoop(origForOp, loopNumBuffers, parentForOp);
     // origForOp is erased in createNewLoop. If origForOp is a top operation
     // (i.e in taskTopOps), make sure taskTopOps is updated with the newForOp.
     auto asyncTaskLoopForItr = std::find(taskTopOps.begin(), taskTopOps.end(),
@@ -649,17 +668,19 @@ static Value createBarrierAlloc(triton::FuncOp funcOp, unsigned distance) {
 DenseMap<Channel *, DenseMap<int, Value>>
 createToken(const DenseMap<Operation *, SmallVector<Channel *>> &map,
             const SmallVector<Operation *> &mapKeyVec, triton::FuncOp funcOp,
-            int numBuffers, int numConsumerGroups,
+            int numConsumerGroups,
             DenseMap<Channel *, DenseMap<int, Value>> &barrierAllocMap) {
   DenseMap<Channel *, DenseMap<int, Value>> ret;
   OpBuilder builder(funcOp);
   builder.setInsertionPointToStart(&(funcOp.getBody().front()));
   for (auto *key : mapKeyVec) {
     auto it = map.find(key);
-    for (auto consumerAsyncTaskId : it->second.front()->relation.second) {
+    Channel *channel = it->second.front();
+    for (auto consumerAsyncTaskId : channel->relation.second) {
       Value v;
       if (it->second.front()->srcOp->getParentOfType<scf::ForOp>()) {
-        v = builder.create<ttng::CreateTokenOp>(funcOp.getLoc(), numBuffers);
+        v = builder.create<ttng::CreateTokenOp>(funcOp.getLoc(),
+                                                channel->numBuffers);
       } else {
         v = builder.create<ttng::CreateTokenOp>(funcOp.getLoc(), 1);
       }
@@ -669,7 +690,7 @@ createToken(const DenseMap<Operation *, SmallVector<Channel *>> &map,
 
       auto producerOp = it->second.front()->srcOp;
       if (isa<tt::ExperimentalDescriptorLoadOp>(producerOp)) {
-        Value bAlloc = createBarrierAlloc(funcOp, numBuffers);
+        Value bAlloc = createBarrierAlloc(funcOp, channel->numBuffers);
         // Channels in the group share the same set of tokens.
         for (auto &c : it->second) {
           ret[c][consumerAsyncTaskId] = v;
@@ -684,7 +705,7 @@ createToken(const DenseMap<Operation *, SmallVector<Channel *>> &map,
 // Create a buffer array for each channel, if the producer is in a ForOp,
 // the buffer array will contain numBuffers.
 DenseMap<Channel *, Value> createBuffer(const SmallVector<Channel *> &channels,
-                                        triton::FuncOp funcOp, int numBuffers,
+                                        triton::FuncOp funcOp,
                                         int numConsumerGroups) {
   DenseMap<Channel *, Value> bufferMap;
   MLIRContext *context = funcOp.getContext();
@@ -707,7 +728,7 @@ DenseMap<Channel *, Value> createBuffer(const SmallVector<Channel *> &channels,
       // Get shape, layout and type of the complete buffer
       SmallVector<int64_t> bufferShape(sliceShape.begin(), sliceShape.end());
       if (c->srcOp->getParentOfType<scf::ForOp>())
-        bufferShape.insert(bufferShape.begin(), numBuffers);
+        bufferShape.insert(bufferShape.begin(), c->numBuffers);
       else
         bufferShape.insert(bufferShape.begin(), 1);
       Attribute sharedMemorySpace =
@@ -919,8 +940,7 @@ void buildAsyncComm(
     const DenseMap<Operation *, SmallVector<Channel *>> &map,
     const DenseMap<Channel *, DenseMap<int, Value>> &tokenMap,
     const DenseMap<Channel *, DenseMap<int, Value>> &barrierAllocMap,
-    const DenseMap<Channel *, Value> &bufferMap, int numBuffers,
-    int numConsumerGroups) {
+    const DenseMap<Channel *, Value> &bufferMap, int numConsumerGroups) {
 
   // Find the operation that is along producer's parent chain, and its parent
   // is the same op as producer's parent. Here p is producer, and c is consumer.
@@ -1332,7 +1352,7 @@ public:
 
     // Step 1: collect all communications between producers and consumers.
     SmallVector<std::unique_ptr<Channel>> channelsOrigin;
-    collectAsyncChannels(channelsOrigin, funcOp);
+    collectAsyncChannels(channelsOrigin, funcOp, numBuffers);
     SmallVector<Channel *> channels;
     for (const auto &c : channelsOrigin) {
       channels.push_back(c.get());
@@ -1359,10 +1379,10 @@ public:
     // Step 5: Create tokens, and buffers. A set of tokens for each group of
     // channels and an array of buffers for each channel.
     DenseMap<Channel *, DenseMap<int, Value>> barrierAllocMap;
-    DenseMap<Channel *, DenseMap<int, Value>> tokenMap = createToken(
-        map, mapKeyVec, funcOp, numBuffers, numConsumerGroups, barrierAllocMap);
+    DenseMap<Channel *, DenseMap<int, Value>> tokenMap =
+        createToken(map, mapKeyVec, funcOp, numConsumerGroups, barrierAllocMap);
     DenseMap<Channel *, Value> bufferMap =
-        createBuffer(channels, funcOp, numBuffers, numConsumerGroups);
+        createBuffer(channels, funcOp, numConsumerGroups);
     LLVM_DEBUG({
       LDBG("\n\nafter createBuffer");
       funcOp.dump();
@@ -1370,7 +1390,7 @@ public:
 
     // Step 6: add async communication ops (ProducerAcquire etc). Also lower the
     // loads.
-    buildAsyncComm(map, tokenMap, barrierAllocMap, bufferMap, numBuffers,
+    buildAsyncComm(map, tokenMap, barrierAllocMap, bufferMap,
                    numConsumerGroups);
     LLVM_DEBUG({
       LDBG("\n\nwith SyncOps");
