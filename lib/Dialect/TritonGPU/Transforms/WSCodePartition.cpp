@@ -458,13 +458,11 @@ scf::ForOp createNewLoop(scf::ForOp forOp, int numBuffers,
       loc, arith::CmpIPredicate::uge, nextBufferIdx, numBuffersVal);
   Value bufferLTCond = builder.createWithAsyncTaskIds<arith::CmpIOp>(
       loc, arith::CmpIPredicate::ult, nextBufferIdx, numBuffersVal);
-  if (isInnermostLoop(forOp)) {
-    // nextBufferIdx >= numBuffers ? nextBufferIdx - numBuffers : nextBufferIdx
-    Value moduloBufferIdx = builder.createWithAsyncTaskIds<arith::SubIOp>(
-        loc, nextBufferIdx, numBuffersVal);
-    nextBufferIdx = builder.createWithAsyncTaskIds<mlir::arith::SelectOp>(
-        loc, bufferGECond, moduloBufferIdx, nextBufferIdx);
-  }
+  // nextBufferIdx >= numBuffers ? nextBufferIdx - numBuffers : nextBufferIdx
+  Value moduloBufferIdx = builder.createWithAsyncTaskIds<arith::SubIOp>(
+      loc, nextBufferIdx, numBuffersVal);
+  nextBufferIdx = builder.createWithAsyncTaskIds<mlir::arith::SelectOp>(
+      loc, bufferGECond, moduloBufferIdx, nextBufferIdx);
 
   // nextPhase = ((nextBufferIdx < numBuffers && curPhase) ||
   //              (nextBufferIdx >= numBuffers && curPhase^1))
@@ -490,9 +488,6 @@ scf::ForOp createNewLoop(scf::ForOp forOp, int numBuffers,
   zero = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 32);
   // Set initial values for bufferIdx and phase.
   if (parentForOp) {
-    // Assume parent ForOp has bufferIdx as the last argument.
-    initBufferIdx = parentForOp.getBody()->getArguments().back();
-
     // numSteps = ((upperBound - lowerBound) + forOpStep - 1) / forOpStep
     Value numSteps = builder.createWithAsyncTaskIds<arith::SubIOp>(
         loc, forOp.getUpperBound(), forOp.getLowerBound());
@@ -507,12 +502,17 @@ scf::ForOp createNewLoop(scf::ForOp forOp, int numBuffers,
     numSteps = builder.createWithAsyncTaskIds<arith::DivUIOp>(loc, numSteps,
                                                               forOp.getStep());
 
-    // initBufferIdx = (parentForOp.bufferIdx * numSteps) % numBuffers
-    //   tmpIdx = parentForOp.bufferIdx * numSteps
-    //   initBufferIdx = tmpIdx - tmpIdx / numBuffers * numBuffers
+    // TODO: use a global flattened iteration space index for multi-dim loops.
+    // tmpIdx = parentForOp.iterationIdx * numSteps
+    // initBufferIdx = tmpIdx - tmpIdx / numBuffers * numBuffers
     // initPhase = (tmpIdx / numBuffers) & 1
+    // Assume parent ForOp has bufferIdx as the last argument.
+    Value parentIterIdx = builder.createWithAsyncTaskIds<arith::SubIOp>(
+        loc, parentForOp.getInductionVar(), parentForOp.getLowerBound());
+    parentIterIdx = builder.createWithAsyncTaskIds<arith::DivUIOp>(
+        loc, parentIterIdx, parentForOp.getStep());
     initBufferIdx = builder.createWithAsyncTaskIds<arith::MulIOp>(
-        loc, initBufferIdx, numSteps);
+        loc, parentIterIdx, numSteps);
     Value bufferIdx = builder.createWithAsyncTaskIds<arith::DivUIOp>(
         loc, initBufferIdx, numBuffersVal);
     initBufferIdx = builder.createWithAsyncTaskIds<arith::SubIOp>(
