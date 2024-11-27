@@ -562,6 +562,9 @@ Operation *sliceOp(Operation *op, int offset,
       sliceOp(operand, offset, builder, mappings, reverseMappings,
               partitionScheme);
     newOp = cloneAndSetResultType(op);
+    // recursively set async task ids for child ops
+    newOp->walk(
+        [&](Operation *childOp) { setAsyncTaskIds(childOp, sliceTaskIds); });
   } else {
     llvm_unreachable("unsupported value type");
   }
