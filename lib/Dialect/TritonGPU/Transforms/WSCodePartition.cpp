@@ -182,6 +182,7 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
       for (AsyncTaskId asyncTaskId : getAsyncTaskIds(op)) {
         IRMapping &mapping = tasksToIRMappings[asyncTaskId];
         Operation *newOp = tasksToBuilders[asyncTaskId]->clone(*op, mapping);
+        setAsyncTaskIds(newOp, asyncTaskId);
         for (unsigned i = 0; i < op->getNumResults(); ++i)
           mapping.map(op->getResult(i), newOp->getResult(i));
       }
