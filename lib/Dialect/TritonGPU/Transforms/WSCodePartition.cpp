@@ -63,6 +63,18 @@ unsigned getNumBuffersOrDefault(scf::ForOp forOp, unsigned numBuffers) {
       .getInt();
 }
 
+static bool containsLoop(scf::IfOp ifOp) {
+  for (Operation &nestedOp : ifOp.thenBlock()->without_terminator()) {
+    if (isa<scf::ForOp>(nestedOp))
+      return true;
+  }
+  for (Operation &nestedOp : ifOp.elseBlock()->without_terminator()) {
+    if (isa<scf::ForOp>(nestedOp))
+      return true;
+  }
+  return false;
+}
+
 // Create IfOp for each ayncTaskId.
 DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
                                                   int regDecProducer,
@@ -133,9 +145,10 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
     if (asyncTaskIds.size() == 0)
       continue;
     cloned.push_back(op);
-    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+    auto ifOp = dyn_cast<scf::IfOp>(op);
+    if (ifOp && containsLoop(ifOp)) {
+      assert(ifOp.getNumResults() == 0 && "IfOp outside of a loop has results");
       DenseMap<AsyncTaskId, scf::IfOp> tasksToThisIfOp;
-      // TODO: handle outputs of this IfOp.
       for (AsyncTaskId asyncTaskId : getAsyncTaskIds(op)) {
         IRMapping &mapping = tasksToIRMappings[asyncTaskId];
         auto ifOpForTask = tasksToBuilders[asyncTaskId]->create<scf::IfOp>(
@@ -467,7 +480,6 @@ scf::ForOp createNewLoop(scf::ForOp forOp, int numBuffers,
   auto yieldOp = llvm::cast<scf::YieldOp>(body->getTerminator());
   builder.setInsertionPoint(yieldOp);
   Value one = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 32);
-  Value zero = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 32);
   Value _1_1b = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 1);
   //   nextBufferIdx = bufferIdx + 1
   Value nextBufferIdx =
@@ -503,22 +515,29 @@ scf::ForOp createNewLoop(scf::ForOp forOp, int numBuffers,
 
   builder.setInsertionPoint(forOp);
   Value initBufferIdx, initPhase;
-  zero = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 32);
   // Set initial values for bufferIdx and phase.
   if (parentForOp) {
+    // It is possible that parent loop induction variable has different type.
+    // Here we promote to 64 bit.
     // numSteps = ((upperBound - lowerBound) + forOpStep - 1) / forOpStep
     Value numSteps = builder.createWithAsyncTaskIds<arith::SubIOp>(
         loc, forOp.getUpperBound(), forOp.getLowerBound());
     numSteps = builder.createWithAsyncTaskIds<arith::AddIOp>(loc, numSteps,
                                                              forOp.getStep());
+    if (forOp.getStep().getType() != builder.getI64Type())
+      numSteps = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
+          loc, builder.getI64Type(), numSteps);
+
     Value one =
-        builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 32);
-    Value two =
-        builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 2, 32);
+        builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 64);
     numSteps =
         builder.createWithAsyncTaskIds<arith::SubIOp>(loc, numSteps, one);
+    Value innerForStep = forOp.getStep();
+    if (forOp.getStep().getType() != builder.getI64Type())
+      innerForStep = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
+          loc, builder.getI64Type(), forOp.getStep());
     numSteps = builder.createWithAsyncTaskIds<arith::DivUIOp>(loc, numSteps,
-                                                              forOp.getStep());
+                                                              innerForStep);
 
     // TODO: use a global flattened iteration space index for multi-dim loops.
     // tmpIdx = parentForOp.iterationIdx * numSteps
@@ -529,21 +548,30 @@ scf::ForOp createNewLoop(scf::ForOp forOp, int numBuffers,
         loc, parentForOp.getInductionVar(), parentForOp.getLowerBound());
     parentIterIdx = builder.createWithAsyncTaskIds<arith::DivUIOp>(
         loc, parentIterIdx, parentForOp.getStep());
+    if (parentForOp.getStep().getType() != builder.getI64Type())
+      parentIterIdx = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
+          loc, builder.getI64Type(), parentIterIdx);
+
     initBufferIdx = builder.createWithAsyncTaskIds<arith::MulIOp>(
         loc, parentIterIdx, numSteps);
+    numBuffersVal = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
+        loc, builder.getI64Type(), numBuffersVal);
     Value bufferIdx = builder.createWithAsyncTaskIds<arith::DivUIOp>(
         loc, initBufferIdx, numBuffersVal);
     initBufferIdx = builder.createWithAsyncTaskIds<arith::SubIOp>(
         loc, initBufferIdx,
         builder.createWithAsyncTaskIds<arith::MulIOp>(loc, bufferIdx,
                                                       numBuffersVal));
+    initBufferIdx = builder.createWithAsyncTaskIds<arith::TruncIOp>(
+        loc, builder.getI32Type(), initBufferIdx);
+
     bufferIdx =
         builder.createWithAsyncTaskIds<arith::AndIOp>(loc, bufferIdx, one);
     initPhase = builder.createWithAsyncTaskIds<arith::TruncIOp>(
         loc, builder.getI1Type(), bufferIdx);
   } else {
     // Set initial phase to false, and initial bufferIdx to 0.
-    initBufferIdx = zero;
+    initBufferIdx = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 32);
     initPhase = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 1);
   }
   newLoopArgs.append({initPhase, initBufferIdx});
@@ -1252,6 +1280,10 @@ asyncTaskDivision(Operation *asyncTaskTopOp) {
       if (auto forOp = dyn_cast<scf::ForOp>(op)) {
         // Create a cloned ForOp for each taskId and return the map.
         auto forOps = createForOpsForEachAsyncTaskId(forOp);
+        LLVM_DEBUG({
+          LDBG("-- createForOpsForEachAsyncTaskId: ");
+          forOp.dump();
+        });
         if (op == mainForOp) {
           for (auto kv : forOps) {
             auto f = kv.second;
@@ -1335,13 +1367,26 @@ void cloneAsyncTaskLoopForEachAsyncTaskId(
       SmallVector<Operation *> deleteOps;
       AsyncTaskId targetId = kv.first;
       Operation *newAsyncTaskLoop = kv.second;
+      LLVM_DEBUG({
+        LDBG(" check newAsyncTaskLoop: " << targetId);
+        newAsyncTaskLoop->dump();
+      });
       newAsyncTaskLoop->walk([&](Operation *subOp) {
         auto ids = getAsyncTaskIds(subOp);
+        LLVM_DEBUG({
+          LDBG(" walk subOp: ");
+          subOp->dump();
+        });
         if (std::find(ids.begin(), ids.end(), targetId) == ids.end()) {
           deleteOps.push_back(subOp);
+          LDBG(" erase this op!");
         }
       });
       for (auto it = deleteOps.rbegin(); it != deleteOps.rend(); ++it) {
+        LLVM_DEBUG({
+          LDBG(" erase irrelevant op: ");
+          (*it)->dump();
+        });
         (*it)->erase();
       }
     }
@@ -1384,6 +1429,10 @@ public:
     SmallVector<Operation *> asyncTaskTopOps =
         getTaskTopRegion(funcOp, channels);
     appendBufferIdxArgs(asyncTaskTopOps, numBuffers);
+    LLVM_DEBUG({
+      LDBG("\n\nafter appendBufferIdxArgs");
+      funcOp.dump();
+    });
 
     // Step 5: Create tokens, and buffers. A set of tokens for each group of
     // channels and an array of buffers for each channel.
