@@ -40,9 +40,8 @@ namespace gpu {
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
 #define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
-std::pair<int, bool> scanRegUsage(ArrayRef<Operation *> opList,
-                                  AsyncTaskId asyncTaskId, int regDecProducer,
-                                  int regIncConsumer) {
+std::pair<int, bool> scanRegUsage(Block *block, AsyncTaskId asyncTaskId,
+                                  int regDecProducer, int regIncConsumer) {
   // TODO: scan ops to estimate register usage
   if (asyncTaskId == 0) {
     // deallocate registers
@@ -63,22 +62,222 @@ unsigned getNumBuffersOrDefault(scf::ForOp forOp, unsigned numBuffers) {
       .getInt();
 }
 
-static bool containsLoop(scf::IfOp ifOp) {
-  for (Operation &nestedOp : ifOp.thenBlock()->without_terminator()) {
-    if (isa<scf::ForOp>(nestedOp))
-      return true;
+// Collect argument indices that are used by the specific taskId.
+static SmallVector<unsigned> collectBlockArgsForTask(
+    scf::ForOp forOp, int asyncTaskId,
+    DenseMap<BlockArgument, Value> &blockArgToYieldOperand) {
+
+  // Collect argument indices that can be reached along the definition chain.
+  SetVector<unsigned> argIndices;
+  std::function<void(Value, unsigned)> dfs = [&](Value arg, unsigned argIdx) {
+    for (auto user : arg.getUsers()) {
+      // Skip ops that are not in the same async task
+      if (!hasAsyncTaskId(user, asyncTaskId))
+        continue;
+
+      // Skip control flow ops that are shared by all async tasks
+      if (isa<scf::YieldOp>(user))
+        continue;
+
+      // Found a real user, the arg is needed
+      if (user->getNumRegions() == 0) {
+        argIndices.insert(argIdx);
+        return;
+      }
+
+      // Iterate through all regions of the user operation
+      for (auto &region : user->getRegions()) {
+        for (auto regionArg : region.getArguments()) {
+          if (arg == regionArg)
+            dfs(regionArg, argIdx);
+        }
+      }
+    }
+  };
+
+  // check dependency with DFS traversal for loop args and results.
+  mlir::Block &block = forOp.getRegion().front();
+  for (unsigned i = forOp.getNumInductionVars(); i < block.getNumArguments();
+       ++i) {
+    auto arg = block.getArgument(i);
+    dfs(arg, i - forOp.getNumInductionVars());
   }
-  for (Operation &nestedOp : ifOp.elseBlock()->without_terminator()) {
-    if (isa<scf::ForOp>(nestedOp))
-      return true;
+  for (unsigned i = 0; i < forOp.getNumResults(); ++i) {
+    auto result = forOp->getResult(i);
+    dfs(result, i);
   }
-  return false;
+
+  SmallVector<unsigned> args(argIndices.begin(), argIndices.end());
+  llvm::sort(args);
+  return args;
+}
+
+Operation *SpecializeOp(Operation *op, IRMapping &mapping,
+                        OpBuilderWithAsyncTaskIds &builder,
+                        AsyncTaskId asyncTaskId);
+
+Operation *SpecializeIfOp(scf::IfOp ifOp, IRMapping &mapping,
+                          OpBuilderWithAsyncTaskIds &builder,
+                          AsyncTaskId asyncTaskId) {
+  LLVM_DEBUG({
+    LDBG("specialize ifOp ");
+    ifOp.dump();
+  });
+
+  auto newIfOp = builder.createWithAsyncTaskIds<scf::IfOp>(
+      ifOp.getLoc(), ifOp->getResultTypes(),
+      mapping.lookup(ifOp.getCondition()), true, ifOp.elseBlock());
+
+  OpBuilderWithAsyncTaskIds ifBuilder(ifOp.getContext());
+  ifBuilder.setAsynTaskIdsFromArray({asyncTaskId});
+
+  // Handle thenRegion of this IfOp.
+  ifBuilder.setInsertionPointToEnd(newIfOp.thenBlock());
+  for (Operation &thenOp : ifOp.thenBlock()->getOperations()) {
+    SpecializeOp(&thenOp, mapping, ifBuilder, asyncTaskId);
+  }
+
+  // Handle elseRegion of the IfOp.
+  if (ifOp.elseBlock()) {
+    ifBuilder.setInsertionPointToEnd(newIfOp.elseBlock());
+    for (Operation &elseOp : ifOp.elseBlock()->getOperations()) {
+      SpecializeOp(&elseOp, mapping, ifBuilder, asyncTaskId);
+    }
+  }
+
+  for (unsigned i = 0; i < ifOp.getNumResults(); ++i)
+    mapping.map(ifOp.getResult(i), newIfOp.getResult(i));
+  return newIfOp;
+}
+
+Operation *SpecializeForOp(scf::ForOp forOp, IRMapping &mapping,
+                           OpBuilderWithAsyncTaskIds &builder,
+                           AsyncTaskId asyncTaskId) {
+  // Prepare blockArgToYieldOperand mapping.
+  DenseMap<BlockArgument, Value> blockArgToYieldOperand;
+  auto yieldOp = llvm::cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+  assert(yieldOp.getNumOperands() == forOp.getNumRegionIterArgs());
+  for (unsigned i = 0; i < forOp.getNumRegionIterArgs(); ++i)
+    blockArgToYieldOperand[forOp.getRegionIterArg(i)] = yieldOp.getOperand(i);
+
+  // Create newForOp for each task Id.
+  auto usedArgs =
+      collectBlockArgsForTask(forOp, asyncTaskId, blockArgToYieldOperand);
+
+  // Prepare newLoopArgs.
+  SmallVector<Value> newLoopArgs;
+  for (unsigned argNumber : usedArgs) {
+    auto arg = forOp.getInitArgs()[argNumber];
+    auto newArg = mapping.lookupOrDefault(arg);
+    assert(newArg && "Unexpected missing mapping");
+    newLoopArgs.push_back(newArg);
+  }
+
+  // Prepare loop bounds.
+  auto newLowerBound = mapping.lookupOrDefault(forOp.getLowerBound());
+  auto newUpperBound = mapping.lookupOrDefault(forOp.getUpperBound());
+  auto newStep = mapping.lookupOrDefault(forOp.getStep());
+
+  // Create newForOp.
+  auto newForOp = builder.createWithAsyncTaskIds<scf::ForOp>(
+      forOp.getLoc(), newLowerBound, newUpperBound, newStep, newLoopArgs);
+  if (forOp->getAttr("tt.loop_schedule"))
+    newForOp->setAttr("tt.loop_schedule", forOp->getAttr("tt.loop_schedule"));
+
+  // Initialize Value mapping from forOp to newForOp
+  mapping.map(forOp.getInductionVar(), newForOp.getInductionVar());
+  for (unsigned i = 0; i < usedArgs.size(); ++i) {
+    auto oldArg = forOp.getRegionIterArgs()[usedArgs[i]];
+    auto newArg = newForOp.getRegionIterArgs()[i];
+    mapping.map(oldArg, newArg);
+  }
+
+  // Recursively clone all operations with this asyncTaskId to newForOp.
+  OpBuilderWithAsyncTaskIds forBuilder(forOp.getContext());
+  forBuilder.setAsynTaskIdsFromArray({asyncTaskId});
+  forBuilder.setInsertionPointToStart(newForOp.getBody());
+  for (Operation &op : forOp.getBody()->without_terminator()) {
+    SpecializeOp(&op, mapping, forBuilder, asyncTaskId);
+  }
+
+  // Create YieldOp for newForOp.
+  SmallVector<Value> newYieldOperands;
+  for (unsigned i : usedArgs)
+    newYieldOperands.push_back(mapping.lookup(yieldOp.getOperand(i)));
+
+  bool createNewYield = true;
+  if (newForOp.getBody()->mightHaveTerminator()) {
+    auto initialYield =
+        llvm::cast<scf::YieldOp>(newForOp.getBody()->getTerminator());
+    if (newYieldOperands.size() == 0) {
+      setAsyncTaskIds(initialYield, {asyncTaskId});
+      createNewYield = false;
+    }
+  }
+  if (createNewYield) {
+    auto newYieldOp =
+        forBuilder.create<scf::YieldOp>(yieldOp.getLoc(), newYieldOperands);
+    setAsyncTaskIds(newYieldOp, {asyncTaskId});
+  }
+
+  // Replace results of forOp with results of newForOp.
+  for (unsigned i = 0; i < usedArgs.size(); ++i) {
+    auto oldResult = forOp.getResult(usedArgs[i]);
+    auto newResult = newForOp.getResult(i);
+    oldResult.replaceUsesWithIf(newResult, [&](OpOperand &operand) -> bool {
+      return hasAsyncTaskId(operand.getOwner(), asyncTaskId);
+    });
+  }
+
+  return newForOp;
+}
+
+Operation *SpecializeOp(Operation *op, IRMapping &mapping,
+                        OpBuilderWithAsyncTaskIds &builder,
+                        AsyncTaskId asyncTaskId) {
+  auto taskIds = getAsyncTaskIds(op);
+  // yieldOp are sometimes implict, meaning they do not necessarily have a task
+  // id, but they should be shared by all async tasks.
+  if (!hasAsyncTaskId(op, asyncTaskId) && !isa<scf::YieldOp>(op))
+    return nullptr;
+
+  if (op->getNumRegions() == 0) {
+    Operation *newOp = builder.clone(*op, mapping);
+    setAsyncTaskIds(newOp, asyncTaskId);
+    for (unsigned i = 0; i < op->getNumResults(); ++i)
+      mapping.map(op->getResult(i), newOp->getResult(i));
+    return newOp;
+  } else {
+    if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
+      return SpecializeIfOp(ifOp, mapping, builder, asyncTaskId);
+    } else if (auto forOp = dyn_cast<scf::ForOp>(op)) {
+      return SpecializeForOp(forOp, mapping, builder, asyncTaskId);
+    } else if (auto reduceOp = dyn_cast<ReduceOp>(op)) {
+      Operation *newOp = builder.clone(*op, mapping);
+      // recursively set async task ids for child ops
+      newOp->walk(
+          [&](Operation *childOp) { setAsyncTaskIds(childOp, asyncTaskId); });
+      for (unsigned i = 0; i < op->getNumResults(); ++i)
+        mapping.map(op->getResult(i), newOp->getResult(i));
+      return newOp;
+    } else {
+      llvm_unreachable("Unexpected Op with regions");
+    }
+  }
+
+  return nullptr;
 }
 
 // Create IfOp for each ayncTaskId.
 DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
                                                   int regDecProducer,
                                                   int regIncConsumer) {
+
+  LLVM_DEBUG({
+    LDBG("\n\n");
+    LDBG("Start specializing region");
+  });
+
   MLIRContext *context = funcOp.getContext();
   OpBuilder builder(context);
   auto loc = funcOp.getLoc();
@@ -86,9 +285,19 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
   // Collect original operations
   SmallVector<Operation *> opList;
   for (auto &block : funcOp.getBody().getBlocks()) {
-    for (Operation &op : block.getOperations())
-      opList.push_back(&op);
+    for (Operation &op : block.getOperations()) {
+      auto taskIds = getAsyncTaskIds(&op);
+      if (!taskIds.empty())
+        opList.push_back(&op);
+    }
   }
+
+  LLVM_DEBUG({
+    LDBG("ops to be specialized: ");
+    for (Operation *op : opList) {
+      op->dump();
+    }
+  });
 
   // Create GetAsyncTaskIdOp.
   Block *lastBlock = &funcOp.getBody().back();
@@ -96,12 +305,12 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
   builder.setInsertionPoint(returnOp);
   Value curAsyncTaskId = builder.create<ttng::GetAsyncTaskIdOp>(loc);
 
-  // Resources for each asyncTaskId: builder, IfOp, and IRMapping.
-  DenseMap<AsyncTaskId, std::shared_ptr<OpBuilderWithAsyncTaskIds>>
-      tasksToBuilders;
   DenseMap<AsyncTaskId, scf::IfOp> tasksToIfOp;
-  DenseMap<AsyncTaskId, IRMapping> tasksToIRMappings;
 
+  // Clone all operations into the corresponding if blocks. If the operation
+  // has multiple taskIds, it will be cloned for multiple if blocks.
+  // If the original code has an IfOp, we should only clone its
+  // body with the right asyncTaskId, instead of cloning the IfOp.
   for (AsyncTaskId asyncTaskId : getNestedAsyncTaskIds(funcOp)) {
     // Create IfOp for each asyncTaskId.
     Value cond = builder.create<arith::CmpIOp>(
@@ -112,94 +321,36 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
     tasksToIfOp[asyncTaskId] = ifOp;
     setAsyncTaskIds(ifOp, {asyncTaskId});
 
-    // Create OpBuilderWithAsyncTaskIds for each taskId.
-    auto taskBuilder = std::make_shared<OpBuilderWithAsyncTaskIds>(context);
-    tasksToBuilders[asyncTaskId] = taskBuilder;
-    taskBuilder->setAsynTaskIdsFromArray({asyncTaskId});
-
-    // Decide if this taskId is a producer or a consumer, and create either
-    // RegAllocOp or RegDeallocOp accordingly.
-    auto regAlloc =
-        scanRegUsage(opList, asyncTaskId, regDecProducer, regIncConsumer);
-    taskBuilder->setInsertionPointToStart(&(ifOp.getThenRegion().front()));
-    if (regAlloc.second)
-      taskBuilder->create<ttng::RegAllocOp>(
-          loc, taskBuilder->getI32IntegerAttr(regAlloc.first));
-    else
-      taskBuilder->create<ttng::RegDeallocOp>(
-          loc, taskBuilder->getI32IntegerAttr(regAlloc.first));
+    OpBuilderWithAsyncTaskIds taskBuilder(context);
+    taskBuilder.setAsynTaskIdsFromArray({asyncTaskId});
 
     // Set insertion point before yieldOp.
     auto yieldOp = ifOp.thenYield();
     setAsyncTaskIds(yieldOp, {asyncTaskId});
-    taskBuilder->setInsertionPoint(yieldOp);
+    taskBuilder.setInsertionPoint(yieldOp);
+
+    IRMapping mapping;
+    for (Operation *op : opList) {
+      SpecializeOp(op, mapping, taskBuilder, asyncTaskId);
+    }
   }
 
-  // Clone all operations into the corresponding if blocks. If the operation has
-  // multiple taskIds, it will be cloned for multiple if blocks.
-  // If the original code has an IfOp, we should only clone its
-  // body with the right asyncTaskId, instead of cloning the IfOp.
-  SmallVector<Operation *> cloned;
-  for (Operation *op : opList) {
-    auto asyncTaskIds = getAsyncTaskIds(op);
-    if (asyncTaskIds.size() == 0)
-      continue;
-    cloned.push_back(op);
-    auto ifOp = dyn_cast<scf::IfOp>(op);
-    if (ifOp && containsLoop(ifOp)) {
-      assert(ifOp.getNumResults() == 0 && "IfOp outside of a loop has results");
-      DenseMap<AsyncTaskId, scf::IfOp> tasksToThisIfOp;
-      for (AsyncTaskId asyncTaskId : getAsyncTaskIds(op)) {
-        IRMapping &mapping = tasksToIRMappings[asyncTaskId];
-        auto ifOpForTask = tasksToBuilders[asyncTaskId]->create<scf::IfOp>(
-            loc, mapping.lookup(ifOp.getCondition()));
-        tasksToThisIfOp[asyncTaskId] = ifOpForTask;
-        auto newYieldOp = ifOpForTask.thenYield();
-        tasksToBuilders[asyncTaskId]->setInsertionPoint(newYieldOp);
-      }
-      // Handle thenRegion of this IfOp.
-      for (Operation &thenOp : ifOp.thenBlock()->without_terminator()) {
-        LLVM_DEBUG({
-          LDBG("specialize thenBlock inside ifOp ");
-          thenOp.dump();
-        });
-        for (AsyncTaskId asyncTaskId : getAsyncTaskIds(&thenOp)) {
-          IRMapping &mapping = tasksToIRMappings[asyncTaskId];
-          Operation *newOp =
-              tasksToBuilders[asyncTaskId]->clone(thenOp, mapping);
-          for (unsigned i = 0; i < thenOp.getNumResults(); ++i)
-            mapping.map(thenOp.getResult(i), newOp->getResult(i));
-        }
-      }
-      if (!ifOp.elseBlock())
-        continue; // Done with this IfOp, continue to the next op.
-      // Handle elseRegion of the IfOp.
-      for (AsyncTaskId asyncTaskId : getAsyncTaskIds(op)) {
-        auto newYieldOp = tasksToThisIfOp[asyncTaskId].elseYield();
-        tasksToBuilders[asyncTaskId]->setInsertionPoint(newYieldOp);
-      }
-      for (Operation &thenOp : ifOp.elseBlock()->without_terminator()) {
-        LLVM_DEBUG({
-          LDBG("specialize elseBlock inside ifOp ");
-          thenOp.dump();
-        });
-        for (AsyncTaskId asyncTaskId : getAsyncTaskIds(&thenOp)) {
-          IRMapping &mapping = tasksToIRMappings[asyncTaskId];
-          Operation *newOp =
-              tasksToBuilders[asyncTaskId]->clone(thenOp, mapping);
-          for (unsigned i = 0; i < thenOp.getNumResults(); ++i)
-            mapping.map(thenOp.getResult(i), newOp->getResult(i));
-        }
-      }
-    } else {
-      for (AsyncTaskId asyncTaskId : getAsyncTaskIds(op)) {
-        IRMapping &mapping = tasksToIRMappings[asyncTaskId];
-        Operation *newOp = tasksToBuilders[asyncTaskId]->clone(*op, mapping);
-        setAsyncTaskIds(newOp, asyncTaskId);
-        for (unsigned i = 0; i < op->getNumResults(); ++i)
-          mapping.map(op->getResult(i), newOp->getResult(i));
-      }
-    }
+  // Decide if this taskId is a producer or a consumer, and create either
+  // RegAllocOp or RegDeallocOp accordingly.
+  for (auto ifOps : tasksToIfOp) {
+    AsyncTaskId asyncTaskId = ifOps.first;
+    auto ifOp = ifOps.second;
+    OpBuilderWithAsyncTaskIds taskBuilder(ifOp.getContext());
+    taskBuilder.setAsynTaskIdsFromArray({asyncTaskId});
+    auto regAlloc = scanRegUsage(ifOp.thenBlock(), asyncTaskId, regDecProducer,
+                                 regIncConsumer);
+    taskBuilder.setInsertionPointToStart(&(ifOp.getThenRegion().front()));
+    if (regAlloc.second)
+      taskBuilder.create<ttng::RegAllocOp>(
+          loc, taskBuilder.getI32IntegerAttr(regAlloc.first));
+    else
+      taskBuilder.create<ttng::RegDeallocOp>(
+          loc, taskBuilder.getI32IntegerAttr(regAlloc.first));
   }
 
   LLVM_DEBUG({
@@ -208,7 +359,7 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
   });
 
   // Remove original operations that have been cloned in reverse order.
-  for (auto it = cloned.rbegin(); it != cloned.rend(); ++it) {
+  for (auto it = opList.rbegin(); it != opList.rend(); ++it) {
     Operation *op = *it;
     LLVM_DEBUG({
       LDBG("erasing op ");
@@ -571,7 +722,8 @@ scf::ForOp createNewLoop(scf::ForOp forOp, int numBuffers,
         loc, builder.getI1Type(), bufferIdx);
   } else {
     // Set initial phase to false, and initial bufferIdx to 0.
-    initBufferIdx = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 32);
+    initBufferIdx =
+        builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 32);
     initPhase = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 1);
   }
   newLoopArgs.append({initPhase, initBufferIdx});
@@ -630,7 +782,7 @@ getTaskTopRegion(triton::FuncOp funcOp,
   LLVM_DEBUG({
     LDBG("\nTop Task Bodies");
     for (auto op : asyncTaskOps) {
-      LDBG("\nTash Body:");
+      LDBG("\nTask Body:");
       op->dump();
     }
   });
@@ -1122,277 +1274,6 @@ void buildAsyncComm(
   }
 }
 
-// Collect argument indices that are used by the specific taskId.
-static SmallVector<unsigned> collectBlockArgsForTask(
-    scf::ForOp forOp, int asyncTaskId,
-    DenseMap<BlockArgument, Value> &blockArgToYieldOperand) {
-  DenseSet<Operation *> seen;
-  // Collect argument indices that can be reached along the definition chain.
-  // If reaching a BlockArgument, visit the corresponding yield operand.
-  SetVector<unsigned> argIndices;
-  std::function<void(Operation *)> dfs = [&](Operation *op) {
-    if (!seen.insert(op).second)
-      return;
-    for (Value operand : op->getOperands()) {
-      if (auto blockArg = dyn_cast<BlockArgument>(operand)) {
-        if (!blockArgToYieldOperand[blockArg])
-          continue;
-        argIndices.insert(blockArg.getArgNumber() -
-                          forOp.getNumInductionVars());
-        operand = blockArgToYieldOperand[blockArg];
-      }
-      Operation *depOp = operand.getDefiningOp();
-      assert(depOp && "Unexpected Value with no defining op");
-      if (depOp->getBlock() != forOp.getBody())
-        continue;
-      assert(hasAsyncTaskId(depOp, asyncTaskId) && "Dependency error");
-      dfs(depOp);
-    }
-  };
-
-  // Start from operations that are marked with this asyncTaskId explicitly and
-  // check dependency with DFS traversal.
-  forOp.walk([&](Operation *op) {
-    if (hasAsyncTaskId(op, asyncTaskId) && !isa<scf::YieldOp>(op))
-      dfs(op);
-  });
-
-  SmallVector<unsigned> args(argIndices.begin(), argIndices.end());
-  llvm::sort(args);
-  return args;
-}
-
-DenseMap<AsyncTaskId, scf::ForOp>
-createForOpsForEachAsyncTaskId(scf::ForOp forOp) {
-  // Collect operation list for each asyncTaskId.
-  DenseMap<AsyncTaskId, SmallVector<Operation *>> opList;
-  for (Operation &op : forOp.getBody()->without_terminator()) {
-    auto ids = getAsyncTaskIds(&op);
-    for (AsyncTaskId asyncTaskId : ids)
-      opList[asyncTaskId].push_back(&op);
-  }
-
-  // Prepare blockArgToYieldOperand mapping.
-  DenseMap<BlockArgument, Value> blockArgToYieldOperand;
-  auto yieldOp = llvm::cast<scf::YieldOp>(forOp.getBody()->getTerminator());
-  assert(yieldOp.getNumOperands() == forOp.getNumRegionIterArgs());
-  for (unsigned i = 0; i < forOp.getNumRegionIterArgs(); ++i)
-    blockArgToYieldOperand[forOp.getRegionIterArg(i)] = yieldOp.getOperand(i);
-
-  auto loc = forOp.getLoc();
-  OpBuilderWithAsyncTaskIds builder(forOp.getContext());
-  DenseMap<AsyncTaskId, scf::ForOp> asyncTasksToForOp;
-
-  // Create newForOp for each task Id.
-  for (AsyncTaskId asyncTaskId : getNestedAsyncTaskIds(forOp)) {
-    auto usedArgs =
-        collectBlockArgsForTask(forOp, asyncTaskId, blockArgToYieldOperand);
-
-    // Prepare newLoopArgs.
-    SmallVector<Value> newLoopArgs;
-    for (unsigned argNumber : usedArgs)
-      newLoopArgs.push_back(forOp.getInitArgs()[argNumber]);
-
-    // Create newForOp.
-    builder.setAsynTaskIdsFromArray({asyncTaskId});
-    builder.setInsertionPoint(forOp);
-    auto newForOp = builder.createWithAsyncTaskIds<scf::ForOp>(
-        loc, forOp.getLowerBound(), forOp.getUpperBound(), forOp.getStep(),
-        newLoopArgs);
-    if (forOp->getAttr("tt.loop_schedule"))
-      newForOp->setAttr("tt.loop_schedule", forOp->getAttr("tt.loop_schedule"));
-
-    // Initialize Value mapping from forOp to newForOp
-    IRMapping mapping;
-    mapping.map(forOp.getInductionVar(), newForOp.getInductionVar());
-    for (unsigned i = 0; i < usedArgs.size(); ++i) {
-      auto oldArg = forOp.getRegionIterArgs()[usedArgs[i]];
-      auto newArg = newForOp.getRegionIterArgs()[i];
-      mapping.map(oldArg, newArg);
-    }
-
-    // Clone all operations with this asyncTaskId to newForOp.
-    builder.setInsertionPointToStart(newForOp.getBody());
-    for (Operation *op : opList[asyncTaskId]) {
-      Operation *newOp = builder.clone(*op, mapping);
-      setAsyncTaskIds(newOp, {asyncTaskId});
-      for (unsigned i = 0; i < op->getNumResults(); ++i)
-        mapping.map(op->getResult(i), newOp->getResult(i));
-    }
-
-    // Create YieldOp for newForOp.
-    SmallVector<Value> newYieldOperands;
-    for (unsigned i : usedArgs) {
-      LDBG("lookup operand " << i);
-      newYieldOperands.push_back(mapping.lookup(yieldOp.getOperand(i)));
-    }
-    bool createNewYield = true;
-    if (newForOp.getBody()->mightHaveTerminator()) {
-      auto initialYield =
-          llvm::cast<scf::YieldOp>(newForOp.getBody()->getTerminator());
-      if (newYieldOperands.size() == 0) {
-        setAsyncTaskIds(initialYield, {asyncTaskId});
-        createNewYield = false;
-      }
-    }
-    if (createNewYield) {
-      auto newYieldOp =
-          builder.create<scf::YieldOp>(yieldOp.getLoc(), newYieldOperands);
-      setAsyncTaskIds(newYieldOp, {asyncTaskId});
-    }
-
-    // Replace results of forOp with results of newForOp.
-    for (unsigned i = 0; i < usedArgs.size(); ++i) {
-      auto oldResult = forOp.getResult(usedArgs[i]);
-      auto newResult = newForOp.getResult(i);
-      oldResult.replaceUsesWithIf(newResult, [&](OpOperand &operand) -> bool {
-        return hasAsyncTaskId(operand.getOwner(), asyncTaskId);
-      });
-    }
-
-    asyncTasksToForOp[asyncTaskId] = newForOp;
-  }
-
-  return asyncTasksToForOp;
-}
-
-// Input asyncTaskTopOp can be an IfOp that contains a ForOp. We clone
-// the ForOp for each asyncTaskId.
-DenseMap<AsyncTaskId, Operation *>
-asyncTaskDivision(Operation *asyncTaskTopOp) {
-  DenseMap<AsyncTaskId, Operation *> asyncTaskTopOpMap;
-  Operation *mainForOp = asyncTaskTopOp;
-  if (auto ifOp = dyn_cast<scf::IfOp>(asyncTaskTopOp)) {
-    // Find the outmost ForOp inside. Assume only a single ForOp.
-    Operation *nestedFor = nullptr;
-    asyncTaskTopOp->walk([&](Operation *op) {
-      if (auto forOp = dyn_cast<scf::ForOp>(op)) {
-        assert(nestedFor == nullptr);
-        nestedFor = op;
-      }
-    });
-    assert(nestedFor && "can't find ForOp in a top-level IfOp");
-    mainForOp = nestedFor;
-  }
-  asyncTaskTopOp->walk([&](Operation *op) {
-    auto ids = getAsyncTaskIds(op);
-    if (op->getNumRegions() > 0 && ids.size() > 1) {
-      if (auto forOp = dyn_cast<scf::ForOp>(op)) {
-        // Create a cloned ForOp for each taskId and return the map.
-        auto forOps = createForOpsForEachAsyncTaskId(forOp);
-        LLVM_DEBUG({
-          LDBG("-- createForOpsForEachAsyncTaskId: ");
-          forOp.dump();
-        });
-        if (op == mainForOp) {
-          for (auto kv : forOps) {
-            auto f = kv.second;
-            auto id = getAsyncTaskIds(f.getOperation());
-            assert(id.size() == 1 &&
-                   "generated ForOp doesn't have one and only one asyncTaskId");
-            asyncTaskTopOpMap[id.front()] = f.getOperation();
-          }
-        }
-        // For debugging purposes, check to see if it is safe to erase the
-        // original ForOp.
-        bool hasIssue = false;
-        for (Operation &opT : forOp.getBody()->without_terminator()) {
-          // Check to see if opT is used in another block.
-          for (unsigned i = 0; i < opT.getNumResults(); ++i)
-            for (Operation *user : opT.getResult(i).getUsers()) {
-              if (user->getBlock() != opT.getBlock()) {
-                hasIssue = true;
-                LLVM_DEBUG({
-                  LDBG("-- op has user in another block");
-                  opT.dump();
-                  user->dump();
-                });
-              }
-            }
-        }
-        if (hasIssue) {
-          for (Operation &opT : forOp.getBody()->without_terminator()) {
-            LLVM_DEBUG({
-              LDBG("addr " << (&opT) << ": ");
-              opT.dump();
-            });
-          }
-        }
-        bool hasUse = false;
-        for (unsigned i = 0; i < op->getNumResults(); ++i) {
-          for (Operation *user : op->getResult(i).getUsers()) {
-            hasUse = true;
-            LLVM_DEBUG({
-              LDBG("op has use ");
-              user->dump();
-            });
-          }
-        }
-        ModuleOp moduleOp = forOp->getParentOfType<ModuleOp>();
-        LLVM_DEBUG({
-          LDBG("erase ForOp");
-          forOp.dump();
-        });
-        forOp.erase();
-        LDBG("done erasing ForOp");
-      } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
-        // The ForOp inside this ifOp will be cloned.
-        LDBG("IfOp in asyncTaskDivision");
-      } else if (auto whileOp = dyn_cast<scf::WhileOp>(op)) {
-        LDBG("WhileOp in asyncTaskDivision");
-      } else {
-        llvm_unreachable("Unexpected Op with regions");
-      }
-    }
-  });
-  assert(asyncTaskTopOpMap.size() > 0 && "AsyncTask division failed");
-  return asyncTaskTopOpMap;
-}
-
-void cloneAsyncTaskLoopForEachAsyncTaskId(
-    SmallVector<Operation *> &asyncTaskTopOps) {
-  SmallVector<Operation *> newBackBone;
-
-  for (Operation *op : asyncTaskTopOps) {
-    auto loc = op->getLoc();
-    OpBuilderWithAsyncTaskIds builder(op->getContext());
-    builder.setInsertionPoint(op);
-    // Step 1: create a cloned forOp for each taskId based on the original
-    // ForOp that is in this top-level operation.
-    DenseMap<AsyncTaskId, Operation *> newAsyncTaskLoops =
-        asyncTaskDivision(op);
-
-    // Step 2: remove irrelevant Ops from the cloned ForOps.
-    for (auto kv : newAsyncTaskLoops) {
-      SmallVector<Operation *> deleteOps;
-      AsyncTaskId targetId = kv.first;
-      Operation *newAsyncTaskLoop = kv.second;
-      LLVM_DEBUG({
-        LDBG(" check newAsyncTaskLoop: " << targetId);
-        newAsyncTaskLoop->dump();
-      });
-      newAsyncTaskLoop->walk([&](Operation *subOp) {
-        auto ids = getAsyncTaskIds(subOp);
-        LLVM_DEBUG({
-          LDBG(" walk subOp: ");
-          subOp->dump();
-        });
-        if (std::find(ids.begin(), ids.end(), targetId) == ids.end()) {
-          deleteOps.push_back(subOp);
-          LDBG(" erase this op!");
-        }
-      });
-      for (auto it = deleteOps.rbegin(); it != deleteOps.rend(); ++it) {
-        LLVM_DEBUG({
-          LDBG(" erase irrelevant op: ");
-          (*it)->dump();
-        });
-        (*it)->erase();
-      }
-    }
-  }
-}
-
 class TritonGPUWSCodePartitionPass
     : public impl::TritonGPUWSCodePartitionBase<TritonGPUWSCodePartitionPass> {
 public:
@@ -1473,16 +1354,9 @@ public:
       funcOp.dump();
     });
 
-    // Clone taskTopOp, remove irrelevant blockArgument for {forOp, ifOp}
-    cloneAsyncTaskLoopForEachAsyncTaskId(asyncTaskTopOps);
-    LLVM_DEBUG({
-      LDBG("\n\nwith Loop Split");
-      funcOp.dump();
-    });
-
     auto ret = SpecializeRegion(funcOp, regDecProducer, regIncConsumer);
     LLVM_DEBUG({
-      LDBG("\n\nwith IfOps");
+      LDBG("\n\nwith SpecializeRegion");
       funcOp.dump();
     });
   }
