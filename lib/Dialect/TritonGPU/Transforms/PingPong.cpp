@@ -59,6 +59,15 @@ static Value createGetAsyncTaskId(OpBuilder &builder, Operation *op) {
   return builder.create<ttng::GetAsyncTaskIdOp>(loc);
 }
 
+static bool isInnermostLoop(scf::ForOp forOp) {
+  for (Operation &nestedOp : forOp.getBody()->getOperations()) {
+    if (isa<scf::ForOp>(nestedOp)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 #define GEN_PASS_DEF_TRITONGPUPINGPONGSYNC
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
@@ -74,7 +83,10 @@ public:
   };
 
   void getNestedFor(scf::IfOp ifOp, SmallVector<scf::ForOp> &loops) {
-    ifOp->walk([&](scf::ForOp forOp) { loops.push_back(forOp); });
+    ifOp->walk([&](scf::ForOp forOp) {
+      if (isInnermostLoop(forOp))
+        loops.push_back(forOp);
+    });
   }
   void runOnFuncOp(triton::FuncOp funcOp) {
     // Insert sync points in ForOp for consumer warp groups. Enable this pass
@@ -96,79 +108,94 @@ public:
 
     if (!mlir::triton::tools::getBoolEnv("ENABLE_PINGPONG"))
       return;
-    if (loops.size() != 1)
+    LDBG("Found loops: " << loops.size());
+    if (loops.size() != 2)
       return;
 
-    Operation *startOfGemm = nullptr;
-    Operation *endOfGemm = nullptr;
-    // FIXME: only handle the first loop.
-    auto forOp = loops[0];
-    OpBuilder builder(forOp);
-    // A simple heuristic for now:
-    //   Mark the start of a gemm section when hitting a DotLike op.
-    //   Mark the end of a gemm section once hitting a expensive cuda op.
-    for (auto &op : forOp.getBody()->without_terminator()) {
-      if (startOfGemm && endOfGemm)
-        break;
-      bool isCudaCore = isExpensiveComp(&op);
-      if (op.hasTrait<OpTrait::DotLike>() && !isCudaCore &&
-          startOfGemm == nullptr) {
-        startOfGemm = &op;
-        continue;
+    // Assume two loops have the same ops.
+    SmallVector<Operation *> starts, ends;
+    for (auto forOp : loops) {
+      Operation *startOfGemm = nullptr;
+      Operation *endOfGemm = nullptr;
+      // A simple heuristic for now:
+      //   Mark the start of a gemm section when hitting a DotLike op.
+      //   Mark the end of a gemm section once hitting an expensive non-dot
+      //   computation op.
+      for (auto &op : forOp.getBody()->without_terminator()) {
+        if (startOfGemm && endOfGemm)
+          break;
+        bool isCudaCore = isExpensiveComp(&op);
+        if (op.hasTrait<OpTrait::DotLike>() && !isCudaCore &&
+            startOfGemm == nullptr) {
+          startOfGemm = &op;
+          continue;
+        }
+        if (!op.hasTrait<OpTrait::DotLike>() && isCudaCore && startOfGemm) {
+          endOfGemm = &op;
+          break;
+        }
       }
-      if (!op.hasTrait<OpTrait::DotLike>() && isCudaCore && startOfGemm) {
-        endOfGemm = &op;
-        break;
-      }
+      if (!startOfGemm || !endOfGemm)
+        return;
+      LLVM_DEBUG({
+        LDBG("found start of tensor core ops");
+        startOfGemm->dump();
+      });
+      LLVM_DEBUG({
+        LDBG("found end of tensor core ops");
+        endOfGemm->dump();
+      });
+      starts.push_back(startOfGemm);
+      ends.push_back(endOfGemm);
     }
-    if (!startOfGemm || !endOfGemm)
-      return;
+    unsigned idx = 0;
+    for (auto forOp : loops) {
+      OpBuilder builder(forOp);
+      Operation *startOfGemm = starts[idx];
+      Operation *endOfGemm = ends[idx];
+      ++idx;
 
-    LLVM_DEBUG({
-      LDBG("found start of tensor core ops");
-      startOfGemm->dump();
-    });
-    LLVM_DEBUG({
-      LDBG("found end of tensor core ops");
-      endOfGemm->dump();
-    });
+      // FIXME: hard-code using named barrier 9 and 10 in this pass.
+      // Prior to the forOp, add "bar.arrive 9, 256" only when task Id is 2.
+      // At startOfGemm, insert "bar.sync 8+taskId, 256"
+      // At endOfGemm, insert "bar.arrive 11-taskId, 256"
+      builder.setInsertionPoint(forOp);
+      auto forLoc = forOp->getLoc();
 
-    // FIXME: hard-code using named barrier 9 and 10 in this pass.
-    // Prior to the forOp, add "bar.arrive 9, 256" only when task Id is 2.
-    // At startOfGemm, insert "bar.sync 8+taskId, 256"
-    // At endOfGemm, insert "bar.arrive 11-taskId, 256"
-    builder.setInsertionPoint(forOp);
-    auto forLoc = forOp->getLoc();
+      // FIXME: hard-code total number of threads to be 256 when
+      // numConsumerGroups is 2.
+      Value numThreads = builder.create<arith::ConstantIntOp>(forLoc, 256, 32);
+      static int PING_BARRIER = 9;
+      static int PONG_BARRIER = 10;
+      // for taskId of 1, generate: bar.sync pingBarrier; bar.arrive pongBarrier
+      // for taskId of 2, outside of the loop, generate bar.arrive pingBarrier
+      //   inside the loop, generate bar.sync pongBarrier; bar.arrive
+      //   pingBarrier
+      Value pingBarrier =
+          builder.create<arith::ConstantIntOp>(forLoc, PING_BARRIER, 32);
 
-    // FIXME: hard-code total number of threads to be 256 when numConsumerGroups
-    // is 2.
-    Value numThreads = builder.create<arith::ConstantIntOp>(forLoc, 256, 32);
-    Value c_9 = builder.create<arith::ConstantIntOp>(forLoc, 9, 32);
+      // "bar.arrive 9, 256" only when task Id is 2.
+      int wgId = getSingleTaskId(forOp);
+      LDBG("Check loop with taskId: " << wgId);
+      if (wgId == 2)
+        builder.create<ttng::NamedBarrierArriveOp>(forLoc, pingBarrier,
+                                                   numThreads);
 
-    // "bar.arrive 9, 256" only when task Id is 2.
-    Value c_2 = builder.create<arith::ConstantIntOp>(forLoc, 2, 32);
-    Value curTaskId = createGetAsyncTaskId(builder, forOp);
-    auto pred = builder.create<arith::CmpIOp>(forLoc, arith::CmpIPredicate::eq,
-                                              curTaskId, c_2);
-    auto ifOp = builder.create<scf::IfOp>(forLoc, pred, /*else=*/false);
-    builder.setInsertionPoint(ifOp.thenYield());
-    builder.create<ttng::NamedBarrierArriveOp>(forLoc, c_9, numThreads);
+      // At startOfGemm, insert "bar.sync 9 or 10, 256"
+      builder.setInsertionPoint(startOfGemm);
+      auto loc = startOfGemm->getLoc();
+      Value syncBarrier = builder.create<arith::ConstantIntOp>(
+          loc, wgId == 1 ? PING_BARRIER : PONG_BARRIER, 32);
+      builder.create<ttng::NamedBarrierWaitOp>(loc, syncBarrier, numThreads);
 
-    // At startOfGemm, insert "bar.sync 8+taskId, 256"
-    // 8 + taskId: 9 for taskId 1 and 10 for taskId 2.
-    builder.setInsertionPoint(startOfGemm);
-    auto loc = startOfGemm->getLoc();
-    Value c_8 = builder.create<arith::ConstantIntOp>(loc, 8, 32);
-    Value syncBarrier = builder.create<arith::AddIOp>(loc, c_8, curTaskId);
-    builder.create<ttng::NamedBarrierWaitOp>(loc, syncBarrier, numThreads);
-
-    // At endOfGemm, insert "bar.arrive 11-taskId, 256"
-    // 11 - taskId: 10 for taskId 1 and 9 for taskId2.
-    builder.setInsertionPoint(endOfGemm);
-    auto loc2 = endOfGemm->getLoc();
-    Value c_11 = builder.create<arith::ConstantIntOp>(loc2, 11, 32);
-    Value arriveBarrier = builder.create<arith::SubIOp>(loc2, c_11, curTaskId);
-    builder.create<ttng::NamedBarrierArriveOp>(loc2, arriveBarrier, numThreads);
+      // At endOfGemm, insert "bar.arrive 10 or 9, 256"
+      builder.setInsertionPoint(endOfGemm);
+      auto loc2 = endOfGemm->getLoc();
+      Value arriveBarrier = builder.create<arith::ConstantIntOp>(
+          loc2, wgId == 1 ? PONG_BARRIER : PING_BARRIER, 32);
+      builder.create<ttng::NamedBarrierArriveOp>(loc2, arriveBarrier,
+                                                 numThreads);
+    }
   }
 
   void runOnOperation() override {
