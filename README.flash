@@ -1,0 +1,51 @@
+echo "with WarpSpec"
+echo "---- no CompPipe no TMA"
+~/projects/triton/clean.sh
+CUDA_VISIBLE_DEVICES=5 TORCH_CUDA_ARCH_LIST=9.0a python run.py --op flash_attention --only triton_tutorial_flash_v2_tma_ws,triton_tutorial_flash_v2_tma_ws_persistent,triton_tutorial_flash_v2 --num-inputs 1 --seq-len 13 --metrics tflops --batch 8 --n-heads 16 --d-head 128
+
+CUDA_VISIBLE_DEVICES=5 TORCH_CUDA_ARCH_LIST=9.0a python run.py --op flash_attention --only triton_tutorial_flash_v2_tma_ws,triton_tutorial_flash_v2_tma_ws_persistent,triton_tutorial_flash_v2 --num-inputs 1 --seq-len 13 --metrics accuracy --batch 8 --n-heads 16 --d-head 128 --baseline triton_tutorial_flash_v2
+
+echo "---- with TMA, CompPipe, PEEL_LAST_ITER"
+# for compiler: SWP_FOR_CONSUMER, PEEL_LAST_ITER
+# PEEL_LAST_ITER doesn't work with triton_tutorial_flash_v2
+~/projects/triton/clean.sh
+WITH_TMA=1 ENABLE_COMPPIPE=1 SWP_FOR_CONSUMER=1 PEEL_LAST_ITER=1 CUDA_VISIBLE_DEVICES=5 TORCH_CUDA_ARCH_LIST=9.0a python run.py --op flash_attention --only triton_tutorial_flash_v2_ws,triton_tutorial_flash_v2_tma_ws,triton_tutorial_flash_v2_tma_ws_persistent --num-inputs 1 --seq-len 13 --metrics tflops --batch 8 --n-heads 16 --d-head 128
+
+echo "---- with TMA"
+~/projects/triton/clean.sh
+# WITH_TMA only applies to tma_ws and tma_ws_persistent
+WITH_TMA=1 CUDA_VISIBLE_DEVICES=5 TORCH_CUDA_ARCH_LIST=9.0a python run.py --op flash_attention --only triton_tutorial_flash_v2_tma_ws,triton_tutorial_flash_v2_tma_ws_persistent,triton_tutorial_flash_v2 --num-inputs 1 --seq-len 13 --metrics tflops --batch 8 --n-heads 16 --d-head 128
+WITH_TMA=1 CUDA_VISIBLE_DEVICES=5 TORCH_CUDA_ARCH_LIST=9.0a python run.py --op flash_attention --only triton_tutorial_flash_v2_tma_ws,triton_tutorial_flash_v2_tma_ws_persistent,triton_tutorial_flash_v2 --num-inputs 1 --seq-len 13 --metrics accuracy --batch 8 --n-heads 16 --d-head 128 --baseline triton_tutorial_flash_v2
+
+# try overriding
+# Sample output
+# no CompPipe no TMA
+#              (8, 16, 8192, 128)               471.064               472.432               428.34
+# with TMA with CompPipe
+#              (8, 16, 8192, 128)               482.005               512.908               513.23
+# with TMA
+#              (8, 16, 8192, 128)               490.732               514.722               424.237
+#
+#
+diff --git a/tritonbench/kernels/triton_fused_attention.py b/tritonbench/kernels/triton_fused_attention.py
+index 9b8c527..da46093 100644
+--- a/tritonbench/kernels/triton_fused_attention.py
++++ b/tritonbench/kernels/triton_fused_attention.py
+@@ -156,7 +156,7 @@ def _attn_fwd_inner(
+         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
+         V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
+     # loop over k, v and update accumulator
+-    for start_n in tl.range(lo, hi, BLOCK_N):  # , loop_schedule=LOOP_SCHEDULE):
++    for start_n in tl.range(lo, hi, BLOCK_N, loop_schedule=LOOP_SCHEDULE):
+         start_n = tl.multiple_of(start_n, BLOCK_N)
+         # -- compute qk ----
+         if ENABLE_TMA:
+@@ -260,7 +260,7 @@ def _attn_fwd_inner_ws(
+         K_block_ptr = tl.advance(K_block_ptr, (0, lo))
+         V_block_ptr = tl.advance(V_block_ptr, (lo, 0))
+     # loop over k, v and update accumulator
+-    for start_n in tl.range(lo, hi, BLOCK_N):  # , loop_schedule=LOOP_SCHEDULE):
++    for start_n in tl.range(lo, hi, BLOCK_N, loop_schedule=LOOP_SCHEDULE):
+         start_n = tl.multiple_of(start_n, BLOCK_N)
+         # -- compute qk ----
+         with tl.async_task([0]):

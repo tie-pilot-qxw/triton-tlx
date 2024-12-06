@@ -191,6 +191,15 @@ private:
         auto shapePerCTA = triton::gpu::getShapePerCTA(allocType);
         auto bytes = product<int64_t>(shapePerCTA) *
                      allocType.getElementTypeBitWidth() / 8;
+        if (op->hasAttr("allocation.copy")) {
+          auto copy = cast<IntegerAttr>(op->getAttr("allocation.copy"))
+                          .getValue()
+                          .getZExtValue();
+          op->setAttr(
+              "allocation.size",
+              IntegerAttr::get(IntegerType::get(op->getContext(), 32), bytes));
+          bytes = bytes * copy;
+        }
 
         auto alignment = alloc.getAlignmentOrDefault();
         allocation->addBuffer<BufferT::BufferKind::Explicit>(result, bytes,
@@ -253,6 +262,15 @@ private:
           isa<triton::PointerType>(srcTy.getElementType())
               ? elems * kPtrBitWidth / 8
               : elems * std::max<int>(8, srcTy.getElementTypeBitWidth()) / 8;
+      if (op->hasAttr("allocation.copy")) {
+        auto copy = cast<IntegerAttr>(op->getAttr("allocation.copy"))
+                        .getValue()
+                        .getZExtValue();
+        op->setAttr(
+            "allocation.size",
+            IntegerAttr::get(IntegerType::get(op->getContext(), 32), bytes));
+        bytes = bytes * copy;
+      }
       maybeAddScratchBuffer<BufferT::BufferKind::Scratch>(op, bytes,
                                                           scratchAlignment);
     } else if (isa<triton::AtomicRMWOp, triton::AtomicCASOp>(op)) {

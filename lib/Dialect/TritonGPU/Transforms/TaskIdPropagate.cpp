@@ -231,8 +231,8 @@ bool verifyTaskId(triton::FuncOp &funcOp,
           op->dump();
         }
       });
-      assert(oneVecCoversTheOther(defTaskIds, asyncTaskIds) &&
-             "defTaskIds should cover asyncTaskIds");
+      if (!oneVecCoversTheOther(defTaskIds, asyncTaskIds))
+        setAsyncTaskIds(defOp, asyncTaskIds);
     }
   });
   return retCode;

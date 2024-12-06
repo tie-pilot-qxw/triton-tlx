@@ -251,4 +251,38 @@ def TritonGPUWSLowering : Pass<"tritongpu-warp-spec-lowering", "mlir::ModuleOp">
            "number of consumer warp groups for warp specialization">
   ];
 }
+
+def TritonGPUPingPongSync: Pass<"tritongpu-ping-pong-sync", "mlir::ModuleOp"> {
+  let summary = "TritonGPU experiemental ping pong schedule";
+
+  let description = "This pass generates warp specialized code baed on warp group id attributes.";
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::TritonDialect"];
+  let options = [
+    Option<"numConsumerGroups", "num-consumer-groups",
+           "int32_t", /*default*/"0",
+           "number of consumer warp groups for warp specialization">,
+    Option<"partitionStyle", "partition-style",
+           "int32_t", /*default*/"0",
+           "partition style for multiple consumer warp groups">
+  ];
+}
+
+// #ifdef __FACEBOOK__
+def TritonGPULoopScheduling: Pass<"tritongpu-loop-scheduling", "mlir::ModuleOp"> {
+  let summary = "Generate loop scheduling for SWP";
+
+  let description = "This pass sets up stages and clustering for software pipelining.";
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::TritonDialect"];
+  let options = [
+    Option<"numStages", "num-stages",
+           "int32_t", /*default*/"3",
+           "number of pipeline stages">
+  ];
+}
+// #endif
+
 #endif

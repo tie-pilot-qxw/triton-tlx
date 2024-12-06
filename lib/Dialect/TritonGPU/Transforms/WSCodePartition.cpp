@@ -1210,7 +1210,11 @@ void buildAsyncComm(
     assert((isa<tt::LoadOp, tt::ExperimentalDescriptorLoadOp>(headProducer)) &&
            "producer must be a LoadOp or tma LoadOp");
     builder.setAsynTaskIdsFromArray(asyncTaskP);
-    for (auto token : tokens) {
+    // Sort tokens according to taskId.
+    std::map<int, Value> sortedTokens;
+    for (auto token : tokens)
+      sortedTokens[token.first] = token.second;
+    for (auto token : sortedTokens) {
       // Insert ProducerAcquireOp before the producer.
       builder.setInsertionPoint(headProducer);
       builder.createWithAsyncTaskIds<ttng::ProducerAcquireOp>(
@@ -1225,7 +1229,7 @@ void buildAsyncComm(
       }
     }
 
-    for (auto token : tokens) {
+    for (auto token : sortedTokens) {
       builder.setAsynTaskIdsFromArray(token.first);
       // Insert ConsumerWaitOp
       if (!isa<tt::ExperimentalDescriptorLoadOp>(headProducer)) {
