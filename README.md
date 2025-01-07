@@ -177,7 +177,7 @@ With warp specialization:
 ```
          (M, N, K)    _triton-tflops    cutlass-tflops    cutlass-speedup    cutlass-accuracy    cublas_12.1-tflops    cublas_12.1-speedup    cublas_12.1-accuracy
 ------------------  ----------------  ----------------  -----------------  ------------------  --------------------  ---------------------  ----------------------
-(8192, 8192, 8192)           1028.33           380.182           0.369707                   1               1033.47                1.00499                       1
+(8192, 8192, 8192)           1044.92           387.313           0.370662                   0               1022.42               0.978462                       0
 ```
 
 Without warp specialization:
@@ -194,7 +194,6 @@ Benchmarking instructions:
 ```
 git clone //github.com/pytorch-labs/tritonbench.git
 cd tritonbench
-git checkout hoy/fp8gemmWS
 python install.py --fbgemm
 python run.py --op fp8_gemm_rowwise --m 8192 --n 8192 --k 8192   --no_fp8_fast_accum --warp_specialization
 python run.py --op fp8_gemm_rowwise --m 8192 --n 8192 --k 8192   --no_fp8_fast_accum
