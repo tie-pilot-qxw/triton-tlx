@@ -1149,8 +1149,10 @@ bool reuseBuffers(SmallVector<Operation *> &taskTopOps,
   if (innerForOps.size() == 1) {
     // Persistent with a single inner loop.
     scf::ForOp parentForOp = innerForOps[0]->getParentOfType<scf::ForOp>();
-    if (parentForOp)
+    if (parentForOp) {
       loopWithBufferReuse = innerForOps;
+      LDBG("-- loopWithBufferReuse with size 1");
+    }
     return false;
   }
   // Check to see if the innermost loops are under one parent. And there are no
@@ -1374,9 +1376,7 @@ Value appendBufferIdxArgs(
   SmallVector<Operation *> opList;
   for (auto &op : taskTopOps) {
     if (auto origIfOp = dyn_cast<scf::IfOp>(op)) {
-      if (needAccumulatedLoopCnt(origIfOp, loopWithBufferReuse)) {
-        opList.push_back(op);
-      }
+      opList.push_back(op);
     }
     if (auto origForOp = dyn_cast<scf::ForOp>(op))
       opList.push_back(op);
