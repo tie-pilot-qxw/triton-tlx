@@ -63,9 +63,8 @@ unsigned getNumBuffersOrDefault(scf::ForOp forOp, unsigned numBuffers) {
 }
 
 // Collect argument indices that are used by the specific taskId.
-static SmallVector<unsigned> collectBlockArgsForTask(
-    scf::ForOp forOp, int asyncTaskId,
-    DenseMap<BlockArgument, Value> &blockArgToYieldOperand) {
+static SmallVector<unsigned> collectBlockArgsForTask(scf::ForOp forOp,
+                                                     int asyncTaskId) {
 
   // Collect argument indices that can be reached along the definition chain.
   SetVector<unsigned> argIndices;
@@ -328,16 +327,8 @@ Operation *SpecializeIfOp(scf::IfOp ifOp, IRMapping &mapping,
 Operation *SpecializeForOp(scf::ForOp forOp, IRMapping &mapping,
                            OpBuilderWithAsyncTaskIds &builder,
                            AsyncTaskId asyncTaskId) {
-  // Prepare blockArgToYieldOperand mapping.
-  DenseMap<BlockArgument, Value> blockArgToYieldOperand;
-  auto yieldOp = llvm::cast<scf::YieldOp>(forOp.getBody()->getTerminator());
-  assert(yieldOp.getNumOperands() == forOp.getNumRegionIterArgs());
-  for (unsigned i = 0; i < forOp.getNumRegionIterArgs(); ++i)
-    blockArgToYieldOperand[forOp.getRegionIterArg(i)] = yieldOp.getOperand(i);
-
   // Create newForOp for each task Id.
-  auto usedArgs =
-      collectBlockArgsForTask(forOp, asyncTaskId, blockArgToYieldOperand);
+  auto usedArgs = collectBlockArgsForTask(forOp, asyncTaskId);
 
   // Prepare newLoopArgs.
   SmallVector<Value> newLoopArgs;
@@ -376,6 +367,7 @@ Operation *SpecializeForOp(scf::ForOp forOp, IRMapping &mapping,
   }
 
   // Create YieldOp for newForOp.
+  auto yieldOp = llvm::cast<scf::YieldOp>(forOp.getBody()->getTerminator());
   SmallVector<Value> newYieldOperands;
   for (unsigned i : usedArgs)
     newYieldOperands.push_back(mapping.lookup(yieldOp.getOperand(i)));
