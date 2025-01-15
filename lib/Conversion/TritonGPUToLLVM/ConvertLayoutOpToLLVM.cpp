@@ -207,12 +207,12 @@ private:
       auto multiDimRepId =
           getMultiDimIndex<unsigned>(repId, numReplicates, outOrd);
       if (repId != 0) {
-        b.barrier();
+        insertBarrier(rewriter, op);
       }
       processReplica(loc, rewriter, /*stNotRd*/ true, srcTy, inNumCTAsEachRep,
                      multiDimRepId, inVec, paddedRepShape, origRepShape, outOrd,
                      vals, smemBase);
-      b.barrier();
+      insertBarrier(rewriter, op);
       processReplica(loc, rewriter, /*stNotRd*/ false, dstTy, outNumCTAsEachRep,
                      multiDimRepId, outVec, paddedRepShape, origRepShape,
                      outOrd, outVals, smemBase);
@@ -576,7 +576,7 @@ struct ConvertLayoutOpUsingLinearLayoutsConversion
     llvm::MapVector<int, Value> outVals;
     for (int i = 0; i < iterations; i++) {
       if (i != 0)
-        b.barrier();
+        insertBarrier(rewriter, op);
 
       auto &inRegs = inRegsForIter[i];
       auto &outRegs = outRegsForIter[i];
@@ -600,7 +600,7 @@ struct ConvertLayoutOpUsingLinearLayoutsConversion
         }
       }
 
-      b.barrier();
+      insertBarrier(rewriter, op);
 
       for (int j = 0; j < outSize / iterations; j += scratchConfig.outVec) {
         auto outRegSlice = outRegs[j];

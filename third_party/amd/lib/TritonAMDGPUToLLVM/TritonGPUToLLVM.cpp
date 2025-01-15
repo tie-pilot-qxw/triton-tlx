@@ -96,7 +96,7 @@ struct ConvertTritonAMDGPUToLLVM
     int numCTAs = triton::gpu::TritonGPUDialect::getNumCTAs(mod);
     int threadsPerWarp = triton::gpu::TritonGPUDialect::getThreadsPerWarp(mod);
 
-    // Hack: WSMaterialization may have changed the effective number of warps,
+    // Hack: WSLowering may have changed the effective number of warps,
     // in a way that isn't reflected in ttg.num-warps.  If so, we have to
     // respect that here.
     if (Attribute attr = mod->getAttr("ttg.num-warp-groups-per-cta")) {
