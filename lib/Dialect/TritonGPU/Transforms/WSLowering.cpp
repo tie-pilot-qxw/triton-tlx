@@ -46,7 +46,7 @@ void lowerGetAsyncTaskIdOp(Operation *parentOp, int numConsumerGroups) {
     auto loc = op.getLoc();
     OpBuilder builder(op);
     Value _4 = builder.create<arith::ConstantIntOp>(loc, WARPS_PER_TASK, 32);
-    Value warpId = builder.create<ttng::GetCanonicalWarpIdOp>(loc);
+    Value warpId = builder.create<tt::GetProgramIdOp>(loc, 0);
     Value asyncTaskId = builder.create<arith::DivUIOp>(loc, warpId, _4);
     op.getResult().replaceAllUsesWith(asyncTaskId);
 
@@ -159,98 +159,17 @@ void lowerTokenOperations(Operation *parentOp, int numCTAs,
                           int numConsumerGroups) {
   SmallVector<Operation *> deprecatedOps;
   parentOp->walk([&](ttng::CreateTokenOp createTokenOp) {
-    LoadType loadType = scanLoadTypes(createTokenOp);
-    MLIRContext *context = createTokenOp.getContext();
-    OpBuilder builder(createTokenOp);
-    Location loc = createTokenOp.getLoc();
-
-    Attribute sharedMemorySpace =
-        triton::gpu::SharedMemorySpaceAttr::get(context);
-    auto barrierCTALayout =
-        ttg::CTALayoutAttr::get(context, /*CTAsPerCGA=*/{1},
-                                /*CTASplitNum=*/{1}, /*CTAOrder=*/{0});
-    auto barrierEncoding =
-        ttg::SharedEncodingAttr::get(context, 1, 1, 1, {0}, barrierCTALayout);
-    Type barrierMemDescType =
-        tt::MemDescType::get({createTokenOp.getNum()}, builder.getI64Type(),
-                             barrierEncoding, sharedMemorySpace,
-                             /*mutableMemory=*/true);
-    Type singleBarrierMemDescType =
-        tt::MemDescType::get({1}, builder.getI64Type(), barrierEncoding,
-                             sharedMemorySpace, /*mutableMemory=*/true);
-    Value bufferFullArray = builder.create<mlir::triton::gpu::LocalAllocOp>(
-        loc, barrierMemDescType, Value());
-    Value bufferEmptyArray = builder.create<mlir::triton::gpu::LocalAllocOp>(
-        loc, barrierMemDescType, Value());
-
-    for (unsigned i = 0; i < createTokenOp.getNum(); i++) {
-      Value idx = builder.create<arith::ConstantIntOp>(loc, i, 32);
-      Value barrierFullView = builder.create<ttg::MemDescSubviewOp>(
-          loc, singleBarrierMemDescType, bufferFullArray, idx);
-      unsigned bufferFullCount =
-          loadType == LoadType::LoadTMAOp ? 1 : THREADS_PER_TASK;
-      builder.create<ttng::InitBarrierOp>(loc, barrierFullView,
-                                          bufferFullCount);
-
-      Value barrierEmptyView = builder.create<ttg::MemDescSubviewOp>(
-          loc, singleBarrierMemDescType, bufferEmptyArray, idx);
-      builder.create<ttng::InitBarrierOp>(loc, barrierEmptyView,
-                                          THREADS_PER_TASK);
-    }
-
-    assert(numCTAs == 1 && "remote CTA is not supported yet");
-    builder.create<mlir::gpu::BarrierOp>(loc);
-
-    // Helper function for extracting one index from bufferFullArray.
-    auto extractBufferFull = [&](Location loc, Value idx) -> Value {
-      return builder.create<ttg::MemDescSubviewOp>(
-          loc, singleBarrierMemDescType, bufferFullArray, idx);
-    };
-
-    // Helper function for extracting one index from bufferEmptyArray.
-    auto extractBufferEmpty = [&](Location loc, Value idx) -> Value {
-      return builder.create<ttg::MemDescSubviewOp>(
-          loc, singleBarrierMemDescType, bufferEmptyArray, idx);
-    };
-
     // Process token users: ProducerAcquireOp, ProducerCommitOp, ConsumerWaitOp,
     // and ConsumerReleaseOp.
     for (Operation *user : createTokenOp.getResult().getUsers()) {
       auto loc = user->getLoc();
-      builder.setInsertionPoint(user);
-      if (auto op = dyn_cast<ttng::ProducerAcquireOp>(user)) {
-        Value bufferEmpty = extractBufferEmpty(loc, op.getIdx());
-        assert(user->hasAttr("async_task_id"));
-        setAsyncTaskIds(bufferEmpty.getDefiningOp(), getAsyncTaskIds(user));
-        processProducerAcquireOp(builder, op, bufferEmpty);
-      } else if (auto op = dyn_cast<ttng::ProducerCommitOp>(user)) {
-        Value bufferFull = extractBufferFull(loc, op.getIdx());
-        assert(user->hasAttr("async_task_id"));
-        setAsyncTaskIds(bufferFull.getDefiningOp(), getAsyncTaskIds(user));
-        processProducerCommitOp(builder, op, bufferFull, loadType);
-      } else if (auto op = dyn_cast<ttng::ConsumerWaitOp>(user)) {
-        Value bufferFull = extractBufferFull(loc, op.getIdx());
-        assert(user->hasAttr("async_task_id"));
-        setAsyncTaskIds(bufferFull.getDefiningOp(), getAsyncTaskIds(user));
-        processConsumerWaitOp(builder, op, bufferFull);
-      } else if (auto op = dyn_cast<ttng::ConsumerReleaseOp>(user)) {
-        Value bufferEmpty = extractBufferEmpty(loc, op.getIdx());
-        assert(user->hasAttr("async_task_id"));
-        setAsyncTaskIds(bufferEmpty.getDefiningOp(), getAsyncTaskIds(user));
-        processConsumerReleaseOp(builder, op, bufferEmpty, numCTAs);
-      } else {
-        llvm_unreachable("Unexpected user of token");
-      }
       deprecatedOps.push_back(user);
     }
-
     deprecatedOps.push_back(createTokenOp);
   });
   for (auto op : deprecatedOps) {
     op->erase();
   }
-
-  assert(numCTAs == 1 && "remote CTA is not supported yet");
 }
 
 #define GEN_PASS_DEF_TRITONGPUWSLOWERING

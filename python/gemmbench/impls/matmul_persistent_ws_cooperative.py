@@ -12,15 +12,16 @@ import triton.language as tl
     configs=[
         triton.Config(
             {
-                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_M": 256,
                 "BLOCK_SIZE_N": 256,
-                "BLOCK_SIZE_K": 64,
-                "GROUP_SIZE_M": 8,
+                "BLOCK_SIZE_K": 16,
+                "GROUP_SIZE_M": 4,
+                'waves_per_eu': 2,
             },
-            num_stages=3,
+            num_stages=2,
             num_warps=4,
             num_consumer_groups=2,
-            num_buffers_warp_spec=3,
+            num_buffers_warp_spec=2,
         ),
     ],
     key=["M", "N", "K"],

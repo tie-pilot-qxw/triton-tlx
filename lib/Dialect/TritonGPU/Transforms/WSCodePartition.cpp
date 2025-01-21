@@ -499,24 +499,6 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
     }
   }
 
-  // Decide if this taskId is a producer or a consumer, and create either
-  // RegAllocOp or RegDeallocOp accordingly.
-  for (auto ifOps : tasksToIfOp) {
-    AsyncTaskId asyncTaskId = ifOps.first;
-    auto ifOp = ifOps.second;
-    OpBuilderWithAsyncTaskIds taskBuilder(ifOp.getContext());
-    taskBuilder.setAsynTaskIdsFromArray({asyncTaskId});
-    auto regAlloc = scanRegUsage(ifOp.thenBlock(), asyncTaskId, regDecProducer,
-                                 regIncConsumer);
-    taskBuilder.setInsertionPointToStart(&(ifOp.getThenRegion().front()));
-    if (regAlloc.second)
-      taskBuilder.create<ttng::RegAllocOp>(
-          loc, taskBuilder.getI32IntegerAttr(regAlloc.first));
-    else
-      taskBuilder.create<ttng::RegDeallocOp>(
-          loc, taskBuilder.getI32IntegerAttr(regAlloc.first));
-  }
-
   LLVM_DEBUG({
     LDBG("\n\nWith task Id checks");
     funcOp.dump();
