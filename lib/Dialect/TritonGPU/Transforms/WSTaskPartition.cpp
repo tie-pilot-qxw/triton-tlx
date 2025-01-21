@@ -60,7 +60,7 @@ void doPartition(triton::FuncOp &funcOp, unsigned numConsumerGroups) {
   funcOp.walk([&](Operation *op) {
     if (scf::ForOp forOp = dyn_cast<scf::ForOp>(op))
       loops.push_back(forOp);
-    else if (isa<nvidia_gpu::WarpGroupDotOp>(op))
+    else if (isa<DotOp>(op))
       dots.push_back(op);
     else if (isa<triton::LoadOp, ExperimentalDescriptorLoadOp>(op))
       loads.push_back(op);
@@ -93,7 +93,7 @@ void doPartition(triton::FuncOp &funcOp, unsigned numConsumerGroups) {
 
   for (auto op : dots) {
     consumerOps.push_back(op);
-    auto dotOp = dyn_cast<nvidia_gpu::WarpGroupDotOp>(op);
+    auto dotOp = dyn_cast<DotOp>(op);
     if (!dotOp)
       continue;
     SetVector<Operation *> backwardSlice;

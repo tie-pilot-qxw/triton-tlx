@@ -220,6 +220,11 @@ class HIPBackend(BaseBackend):
         amd.passes.ttgpuir.add_optimize_epilogue(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
         if amd.has_matrix_core_feature(options.arch):
+            passes.ttgpuir.add_ws_task_partition(pm, options.num_consumer_groups)
+            passes.ttgpuir.add_taskid_propagate(pm, options.num_consumer_groups)
+            passes.ttgpuir.add_ws_data_partition(pm, options.num_consumer_groups)
+            passes.ttgpuir.add_ws_code_partition(pm, options.num_buffers_warp_spec, options.num_consumer_groups,
+                                                 options.reg_dec_producer, options.reg_inc_consumer)
             assert options.num_stages != 0, ("Triton AMD backend pipeliner has been updated. "
                                              "We used to trigger software pipelining with "
                                              "num_stages == 0. Now it will not happen anymore; "
@@ -227,7 +232,7 @@ class HIPBackend(BaseBackend):
                                              "equivalent behavior in the past.")
             amd.passes.ttgpuir.add_stream_pipelinev2(pm, options.num_stages)
             passes.common.add_canonicalizer(pm)
-        amd.passes.ttgpuir.insert_instruction_sched_hints(pm)
+            passes.ttgpuir.add_ws_lowering(pm, options.num_consumer_groups)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_reduce_data_duplication(pm)

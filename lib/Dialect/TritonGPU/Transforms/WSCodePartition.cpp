@@ -2125,13 +2125,6 @@ void insertAsyncCopy(triton::FuncOp funcOp,
         continue;
       }
       if (isa<triton::LoadOp>(srcOp)) {
-        SmallVector<AsyncTaskId> asyncTasksPC = getAsyncTaskIds(srcOp);
-        asyncTasksPC.append(getAsyncTaskIds(channel->getDstOp()));
-        // After createAsyncCopy, c->getSrcOp()/headProducer are no longer
-        // valid.
-        createAsyncCopy(bufferMap, channel, channel->getSrcOp(), asyncTasksPC,
-                        bufferIdx, bufferIdx);
-      } else {
         createLocalCopy(bufferMap, channel, bufferIdx, bufferIdx);
       }
     }

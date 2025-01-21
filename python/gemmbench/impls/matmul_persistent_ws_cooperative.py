@@ -87,13 +87,12 @@ def matmul_persistent_ws_cooperative_kernel(
 
         accumulator1 = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
         for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-            with tl.async_task([0]):
-                a1 = tl.load(
-                    a_ptrs1, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0
-                )
-                b = tl.load(
-                    b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0
-                )
+            a1 = tl.load(
+                a_ptrs1, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0
+            )
+            b = tl.load(
+                b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0
+            )
 
             accumulator1 += tl.dot(a1, b)
             a_ptrs1 += BLOCK_SIZE_K * stride_ak
@@ -105,8 +104,7 @@ def matmul_persistent_ws_cooperative_kernel(
         offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         c_ptrs1 = c_ptr + stride_cm * offs_cm1[:, None] + stride_cn * offs_cn[None, :]
         c_mask1 = (offs_cm1[:, None] < M) & (offs_cn[None, :] < N)
-        with tl.async_task([1, 2]):
-            tl.store(c_ptrs1, c1, mask=c_mask1)
+        tl.store(c_ptrs1, c1, mask=c_mask1)
 
 
 def matmul_persistent_ws_cooperative(a, b, activation=""):

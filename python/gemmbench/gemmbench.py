@@ -10,13 +10,13 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import impls
 
 
-if torch.cuda.is_available():
-    from triton._C.libtriton import nvidia
+# if torch.cuda.is_available():
+#     from triton._C.libtriton import nvidia
 
-    cublas_workspace = torch.empty(32 * 1024 * 1024, device="cuda", dtype=torch.uint8)
-    cublas = nvidia.cublas.CublasLt(cublas_workspace)
-else:
-    cublas = None
+#     cublas_workspace = torch.empty(32 * 1024 * 1024, device="cuda", dtype=torch.uint8)
+#     cublas = nvidia.cublas.CublasLt(cublas_workspace)
+# else:
+cublas = None
 
 
 def is_cuda():
@@ -68,20 +68,20 @@ test_impls = [
     aten_matmul,
     # cublas_matmul,
     # inductor_matmul,
-    impls.matmul,
-    impls.matmul_persistent,
-    impls.matmul_persistent_cooperative,
-    impls.matmul_persistent_tma,
-    impls.matmul_persistent_tma_ws,
-    impls.matmul_persistent_tma_ws_cooperative,
-    impls.matmul_persistent_tma_ws_cooperative_manual,
-    impls.matmul_persistent_ws,
+    # impls.matmul,
+    # impls.matmul_persistent,
+    # impls.matmul_persistent_cooperative,
+    # impls.matmul_persistent_tma,
+    # impls.matmul_persistent_tma_ws,
+    # impls.matmul_persistent_tma_ws_cooperative,
+    # impls.matmul_persistent_tma_ws_cooperative_manual,
+    # impls.matmul_persistent_ws,
     impls.matmul_persistent_ws_cooperative,
-    impls.matmul_persistent_ws_cooperative_manual,
-    impls.matmul_tma_ws,
-    impls.matmul_tma_ws_cooperative,
-    impls.matmul_ws_cooperative,
-    impls.matmul_1d_persistent_swp_tma,
+    # impls.matmul_persistent_ws_cooperative_manual,
+    # impls.matmul_tma_ws,
+    # impls.matmul_tma_ws_cooperative,
+    # impls.matmul_ws_cooperative,
+    # impls.matmul_1d_persistent_swp_tma,
 ]
 
 impl_map = {fn.__name__: fn for fn in test_impls}

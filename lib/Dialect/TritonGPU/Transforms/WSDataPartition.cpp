@@ -128,7 +128,7 @@ void getBackwardSliceToPartition(Value root, unsigned dim, int sliceSize,
                 ExperimentalDescriptorLoadOp>(op)) {
           for (Value operand : op->getOperands())
             queue.push_back(operand);
-        } else if (auto dotOp = dyn_cast<nvidia_gpu::WarpGroupDotOp>(op)) {
+        } else if (auto dotOp = dyn_cast<DotOp>(op)) {
           queue.push_back(dim == 0 ? dotOp.getA() : dotOp.getB());
           queue.push_back(dotOp.getC());
         } else {
@@ -193,7 +193,7 @@ void getSliceToPartition(Value root, unsigned dim, int sliceSize,
       for (OpOperand &operand : op->getOpOperands()) {
         getBackwardSliceToPartition(operand.get(), dim, sliceSize, slice);
       }
-    } else if (auto dotOp = dyn_cast<nvidia_gpu::WarpGroupDotOp>(op)) {
+    } else if (auto dotOp = dyn_cast<DotOp>(op)) {
       getBackwardSliceToPartition(dim == 0 ? dotOp.getA() : dotOp.getB(), dim,
                                   sliceSize, slice);
       getBackwardSliceToPartition(dotOp.getC(), dim, sliceSize, slice);
@@ -214,13 +214,13 @@ bool computePartitionScheme(triton::FuncOp &funcOp,
   // Do not partition producer tasks
 
   // Use dot to drive the partition
-  SetVector<nvidia_gpu::WarpGroupDotOp> dots;
+  SetVector<DotOp> dots;
 
   // check all dot ops that have more than one async task id
   funcOp.walk([&](Operation *op) {
     auto asyncTaskIds = getAsyncTaskIds(op);
     if (asyncTaskIds.size() > 1) {
-      if (auto dotWaitOp = dyn_cast<nvidia_gpu::WarpGroupDotOp>(op)) {
+      if (auto dotWaitOp = dyn_cast<DotOp>(op)) {
         dots.insert(dotWaitOp);
       }
     }
@@ -464,7 +464,7 @@ Operation *sliceOp(Operation *op, int offset,
       mappings.map(v, newV);
       reverseMappings.map(newV, v);
     }
-  } else if (auto dotOp = dyn_cast<nvidia_gpu::WarpGroupDotOp>(op)) {
+  } else if (auto dotOp = dyn_cast<DotOp>(op)) {
     // Only hanlde A and accumulator
     sliceOp(dim == 0 ? dotOp.getA() : dotOp.getB(), offset, builder, mappings,
             reverseMappings, partitionScheme);
