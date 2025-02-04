@@ -97,6 +97,9 @@ public:
                                  size_t localStoreOpCount, Type type) const {}
 
   virtual ~TargetInfoBase() {}
+
+  // TODO: Have a better and more general way to handle non-GPU?
+  virtual bool isCPUMode() const = 0;
 };
 } // namespace mlir::triton
 #endif // TRITON_CONVERSION_TRITONGPU_TO_LLVM_TARGETINFOBASE_H
