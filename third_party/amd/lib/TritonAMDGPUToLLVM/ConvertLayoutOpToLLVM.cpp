@@ -31,9 +31,15 @@ namespace {
 struct LocalLoadOpConversion
     : public ConvertOpToLLVMPattern<triton::gpu::LocalLoadOp> {
 public:
-  using ConvertOpToLLVMPattern<
+using ConvertOpToLLVMPattern<
       triton::gpu::LocalLoadOp>::ConvertOpToLLVMPattern;
 
+LocalLoadOpConversion(LLVMTypeConverter &typeConverter,
+                        const TargetInfoBase &targetInfo,
+                        PatternBenefit benefit = 1)
+      : ConvertOpToLLVMPattern(typeConverter, benefit), targetInfo(targetInfo) {
+  }
+  
   LogicalResult
   matchAndRewrite(triton::gpu::LocalLoadOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -46,8 +52,16 @@ public:
             cast<DotOperandEncodingAttr>(dstLayout).getParent())) {
       return lowerSharedToDotOperand(op, adaptor, getTypeConverter(), rewriter);
     }
+
+    if (isa<SharedEncodingAttr>(srcLayout) &&
+        isa<BlockedEncodingAttr>(
+             dstLayout)) {
+      return lowerSharedToDistributed(op, adaptor, getTypeConverter(), rewriter);
+    }
+
     return failure();
   }
+
 
 private:
   /// Lower ttg.local_load in dot operand layout if the operand parent layout is
@@ -113,6 +127,36 @@ private:
     rewriter.replaceOp(op, res);
     return success();
   }
+
+  LogicalResult
+  lowerSharedToDistributed(triton::gpu::LocalLoadOp op, triton::gpu::LocalLoadOpAdaptor adaptor,
+                           const LLVMTypeConverter *typeConverter,
+                           ConversionPatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+    auto srcTy = op.getSrc().getType();
+    auto dstTy = op.getResult().getType();
+    auto dstShape = dstTy.getShape();
+    auto srcSharedLayout = cast<SharedEncodingAttr>(srcTy.getEncoding());
+    auto dstLayout = dstTy.getEncoding();
+    assert((dstShape.size() <= 2) &&
+           "Unexpected rank of ConvertLayout(shared->distributed)");
+    auto inOrd = getOrder(srcSharedLayout);
+
+    auto smemObj = LLVM::getSharedMemoryObjectFromStruct(
+        loc, adaptor.getSrc(),
+        typeConverter->convertType(srcTy.getElementType()), rewriter);
+    auto elemLlvmTy = typeConverter->convertType(dstTy.getElementType());
+
+    SmallVector<Value> outVals = loadSharedToDistributed(
+        dstTy, srcTy, elemLlvmTy, smemObj, loc, rewriter, targetInfo);
+
+    Value result = packLLElements(loc, typeConverter, outVals, rewriter, dstTy);
+    rewriter.replaceOp(op, result);
+
+    return success();
+  }
+ private:
+ const TargetInfoBase &targetInfo;
 };
 
 struct ConvertLayoutOpConversion
@@ -173,6 +217,6 @@ void populateConvertLayoutOpToLLVMPatterns(
     RewritePatternSet &patterns, int numWarps,
     ModuleAxisInfoAnalysis &axisInfoAnalysis, PatternBenefit benefit) {
   patterns.add<ConvertLayoutOpConversion>(typeConverter, benefit);
-  patterns.add<LocalLoadOpConversion>(typeConverter, benefit);
+  patterns.add<LocalLoadOpConversion>(typeConverter, targetInfo, benefit);
 }
 } // namespace mlir::triton::AMD

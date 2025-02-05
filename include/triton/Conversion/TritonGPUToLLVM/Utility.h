@@ -149,6 +149,9 @@ namespace mlir {
 namespace triton {
 
 static inline void insertBarrier(OpBuilder &builder, Operation *op) {
+  
+  return;
+  
   auto barrierOp = builder.create<mlir::gpu::BarrierOp>(op->getLoc());
   auto asyncTaskIds = getAsyncTaskIds(op);
   assert(asyncTaskIds.size() <= 1);

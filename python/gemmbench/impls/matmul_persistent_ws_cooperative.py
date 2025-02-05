@@ -9,19 +9,20 @@ import triton.language as tl
 #   - An auto-tuning *key* whose change in values will trigger evaluation of all the
 #       provided configs
 @triton.autotune(
+
     configs=[
         triton.Config(
             {
-                "BLOCK_SIZE_M": 256,
-                "BLOCK_SIZE_N": 256,
-                "BLOCK_SIZE_K": 16,
-                "GROUP_SIZE_M": 4,
-                'waves_per_eu': 2,
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 32,
+                'waves_per_eu': 0,
             },
-            num_stages=2,
+            num_stages=1,
             num_warps=4,
             num_consumer_groups=2,
-            num_buffers_warp_spec=2,
+            num_buffers_warp_spec=1,
         ),
     ],
     key=["M", "N", "K"],

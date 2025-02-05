@@ -43,6 +43,7 @@ class TT_AMDGPU_Op<string mnemonic, list<Trait> traits = []> :
 // Interfaces
 //
 def GlobalMemory : Resource<"::mlir::triton::GlobalMemory">;
+def SharedMemory : Resource<"::mlir::triton::SharedMemory">;
 
 def InstructionSchedHint : TT_AMDGPU_Op<"instruction_sched_hint", []> {
   let summary = "A placeholder op for instruction scheduling hints within a basic block";
@@ -59,6 +60,51 @@ def InstructionSchedHint : TT_AMDGPU_Op<"instruction_sched_hint", []> {
 
   let assemblyFormat = [{attr-dict}];
 }
+
+def InitBarrierOp : TT_AMDGPU_Op<"init_barrier", [MemoryEffects<[MemWrite<SharedMemory>]>]> {
+    let summary = "Initialize a barrier in the given shared memory allocation.";
+
+    let description = [{
+        Initializes a shared memory barrier.
+        `*alloc` is a descriptor to the shared memory allocation. `count` is the
+        number of arrives expected by the barrier.
+
+    }];
+
+    let arguments = (ins TT_MemDescType:$countAlloc,
+                         I32Attr:$count,
+                         TT_MemDescType:$phaseAlloc,
+                         I32Attr:$phase);
+    let assemblyFormat = "operands attr-dict `:` type(operands)";
+}
+
+def ArriveBarrierOp : TT_AMDGPU_Op<"arrive_barrier",  [MemoryEffects<[MemWrite<SharedMemory>]>]> {
+  let summary = "barrier arrive";
+
+  let description = [{
+    This operation defining the arriving action for a named barrier.
+  }];
+
+  let arguments = (ins 
+                   TT_MemDescType:$count,
+                   TT_MemDescType:$phase
+                  );
+  let results = (outs I32:$result);
+  let assemblyFormat = "operands attr-dict `:` type(operands)";
+}
+
+def ReadBarrierPhaseOp : TT_AMDGPU_Op<"read_barrier_phase",  [MemoryEffects<[MemRead<SharedMemory>]>]> {
+  let summary = "Read phase";
+
+  let description = [{ Read barrier phase}];
+
+  let arguments = (ins 
+                   TT_MemDescType:$phaseAlloc
+                  );
+  let results = (outs I32:$result);
+  //let assemblyFormat = "operands attr-dict `:` type($result)";
+}
+
 
 //
 // AMD Buffer operations.

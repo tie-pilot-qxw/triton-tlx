@@ -89,11 +89,11 @@ impl_map = {fn.__name__: fn for fn in test_impls}
 
 def test():
     torch.manual_seed(0)
-    m = 4 * 11 * 64
-    n = 12 * 256
-    k = 64 * 4
-    a = torch.randn((m, k), device="cuda", dtype=torch.float16)
-    b = torch.randn((k, n), device="cuda", dtype=torch.float16)
+    m = 4096
+    n = 4096
+    k = 4096
+    a = torch.rand((m, k), device="cuda", dtype=torch.float16)
+    b = torch.rand((k, n), device="cuda", dtype=torch.float16)
     torch_output = torch.matmul(a, b)
     # Bigger tolerance for AMD MI200 devices.
     # MI200 devices use reduced precision fp16 and bf16 and flush input and
@@ -102,7 +102,7 @@ def test():
     for fn in test_impls:
         triton_output = fn(a, b)
         torch.cuda.synchronize()
-        if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol):
+        if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=1e-3):
             print(f" Torch matches {fn.__name__}")
         else:
             print(f" Torch DOES NOT match {fn.__name__}")
@@ -110,7 +110,7 @@ def test():
             print(torch_output)
             print("triton output:")
             print(triton_output)
-            #torch.testing.assert_close(triton_output, torch_output, atol=1e-2, rtol=rtol)
+            torch.testing.assert_close(triton_output, torch_output, atol=1e-2, rtol=1e-3)
 
 
 TORCH_HAS_FP8 = False  # hasattr(torch, "float8_e5m2")
@@ -138,7 +138,9 @@ elif GEMM_SHAPES == "llama":
     x_vals = [(m, n, k) for m in [128, 256, 384, 512] for (k, n) in KN]
 else:
     # Simple shape with 4 waves over 132 SMs
-    x_vals = [(4 * 11 * 128, 12 * 256, 4096)]
+    # x_vals = [(4 * 11 * 128, 12 * 256, 4096)]
+        x_vals = [(4096, 4096, 4096)]
+
 
 
 configs = []
@@ -175,7 +177,7 @@ def benchmark(M, N, K, provider, fp8_inputs):
         b = b.to(torch.float8_e5m2)
     quantiles = [0.5, 0.2, 0.8]
     fn = impl_map[provider]
-    ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(lambda: fn(a, b), quantiles=quantiles)
+    ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(lambda: fn(a, b), quantiles=quantiles, rep=1)
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 

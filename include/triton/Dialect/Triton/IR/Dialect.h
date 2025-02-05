@@ -23,6 +23,10 @@
 namespace mlir {
 namespace triton {
 
+struct SharedMemory : public SideEffects::Resource::Base<SharedMemory> {
+  StringRef getName() final { return "<SharedMemory>"; }
+};
+
 struct GlobalMemory : public SideEffects::Resource::Base<GlobalMemory> {
   StringRef getName() final { return "<GlobalMemory>"; }
 };

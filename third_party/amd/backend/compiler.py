@@ -232,10 +232,11 @@ class HIPBackend(BaseBackend):
                                              "equivalent behavior in the past.")
             amd.passes.ttgpuir.add_stream_pipelinev2(pm, options.num_stages)
             passes.common.add_canonicalizer(pm)
-            passes.ttgpuir.add_ws_lowering(pm, options.num_consumer_groups)
+            # passes.ttgpuir.add_ws_lowering(pm, options.num_consumer_groups)
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
         passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_reduce_data_duplication(pm)
+        amd.passes.ttgpuir.add_ws_lowering(pm, options.num_consumer_groups)
         if amd.has_matrix_core_feature(options.arch):
             amd.passes.ttgpuir.add_reorder_instructions(pm)
         if os.environ.get("AMDGCN_USE_BUFFER_OPS", "0") == "1":
@@ -305,11 +306,18 @@ class HIPBackend(BaseBackend):
         amd.set_bool_control_constant(llvm_mod, "__oclc_unsafe_math_opt", False)
         amd.set_bool_control_constant(llvm_mod, "__oclc_wavefrontsize64", options.warp_size == 64)
 
+         # warp-specialization mutates num_warps
+        num_warp_groups = src.get_int_attr("triton_gpu.num-warp-groups-per-cta")
+        if num_warp_groups is not None:
+            metadata["num_warps"] *= num_warp_groups
+        else:
+            num_warp_groups = 1
+
         # Set kernel attributes first given this may affect later optimizations.
         fns = [fn for fn in llvm_mod.get_functions() if not fn.is_declaration()]
         # The public kernel should be kernel 0.
         fns[0].set_calling_conv(amd.CALLING_CONV_AMDGPU_KERNEL)
-        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{options.num_warps*options.warp_size}")
+        fns[0].add_fn_attr("amdgpu-flat-work-group-size", f"1,{options.num_warps*options.warp_size * num_warp_groups}")
         fns[0].add_fn_attr("amdgpu-waves-per-eu", f"{options.waves_per_eu}")
         denormal_mode = "preserve-sign" if options.allow_flush_denorm else "ieee"
         fns[0].add_fn_attr("denormal-fp-math-f32", denormal_mode)
@@ -327,6 +335,7 @@ class HIPBackend(BaseBackend):
 
         # Get some metadata
         metadata["shared"] = src.get_int_attr("triton_gpu.shared")
+       
 
         amd.cleanup_bitcode_metadata(llvm_mod)
         return str(llvm_mod)

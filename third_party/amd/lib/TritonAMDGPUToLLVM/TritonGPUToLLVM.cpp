@@ -102,6 +102,7 @@ struct ConvertTritonAMDGPUToLLVM
     if (Attribute attr = mod->getAttr("triton_gpu.num-warp-groups-per-cta")) {
       numWarps *= cast<IntegerAttr>(attr).getInt();
     }
+    llvm::errs() << "TritonGPUToLLVM numWarps: " << numWarps << "\n";
 
     // Allocate shared memory and set barrier
     ModuleAllocation allocation(mod);
