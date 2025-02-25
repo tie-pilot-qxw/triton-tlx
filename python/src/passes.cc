@@ -79,6 +79,8 @@ void init_triton_passes_ttgpuir(py::module &&m) {
                             createTritonGPUWSCodePartition, int, int, int, int);
   ADD_PASS_OPTION_WRAPPER_1("add_ping_pong_sync", createTritonGPUPingPongSync,
                             int);
+  ADD_PASS_OPTION_WRAPPER_1("add_ws_canonicalization",
+                            createTritonGPUWSCanonicalization, int);
 }
 
 void init_triton_passes_convert(py::module &&m) {

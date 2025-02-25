@@ -280,4 +280,17 @@ def TritonGPUPingPongSync: Pass<"tritongpu-ping-pong-sync", "mlir::ModuleOp"> {
   ];
 }
 
+def TritonGPUWSCanonicalization : Pass<"tritongpu-warp-spec-canonicalization", "mlir::ModuleOp"> {
+  let summary = "Warp specialization canonicalization";
+
+  let description = "This pass fixes up async task id for each op wrapped in a WS region.";
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect",
+                           "mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect"];
+  let options = [
+    Option<"numConsumerGroups", "num-consumer-groups",
+           "int32_t", /*default*/"0",
+           "number of consumer warp groups for warp specialization">
+  ];
+}
 #endif
