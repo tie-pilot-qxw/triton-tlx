@@ -709,12 +709,11 @@ void rewriteRematerializedOps(triton::FuncOp &funcOp,
   }
 }
 
-Operation *sliceOp(Value v, int offset, OpBuilderWithAsyncTaskIds &builder,
-                   IRMapping &mappings, IRMapping &reverseMappings,
+Operation *sliceOp(Value v, int offset, IRMapping &mappings,
+                   IRMapping &reverseMappings,
                    DataPartitionScheme &partitionScheme);
 
-Operation *sliceOp(Operation *op, int offset,
-                   OpBuilderWithAsyncTaskIds &builder, IRMapping &mappings,
+Operation *sliceOp(Operation *op, int offset, IRMapping &mappings,
                    IRMapping &reverseMappings,
                    DataPartitionScheme &partitionScheme) {
   if (!partitionScheme.ops.contains(op))
@@ -748,6 +747,7 @@ Operation *sliceOp(Operation *op, int offset,
     llvm_unreachable("Unexpected asyncTaskIds.size()");
   }
 
+  OpBuilderWithAsyncTaskIds builder(op->getContext());
   builder.setAsynTaskIdsFromArray(sliceTaskIds);
   auto cloneAndSetResultType = [&](Operation *op) {
     builder.setInsertionPoint(op);
@@ -805,8 +805,7 @@ Operation *sliceOp(Operation *op, int offset,
       isa<ConvertLayoutOp, BroadcastOp, SplatOp, ExpandDimsOp, FpToFpOp,
           AtomicRMWOp, LocalAllocOp>(op)) {
     for (Value operand : op->getOperands())
-      sliceOp(operand, offset, builder, mappings, reverseMappings,
-              partitionScheme);
+      sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     newOp = cloneAndSetResultType(op);
   } else if (auto constOp = dyn_cast<arith::ConstantOp>(op)) {
     builder.setInsertionPoint(op);
@@ -844,8 +843,7 @@ Operation *sliceOp(Operation *op, int offset,
     reverseMappings.map(newV, v);
   } else if (isa<StoreOp, LoadOp>(op)) {
     for (Value operand : op->getOperands())
-      sliceOp(operand, offset, builder, mappings, reverseMappings,
-              partitionScheme);
+      sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     // TODO: slice store base ptr
     newOp = cloneAndSetResultType(op);
   } else if (isa<ExperimentalDescriptorLoadOp, ExperimentalDescriptorStoreOp>(
@@ -879,7 +877,7 @@ Operation *sliceOp(Operation *op, int offset,
       reverseMappings.map(newV, v);
     }
   } else if (auto transOp = dyn_cast<TransOp>(op)) {
-    sliceOp(transOp.getSrc(), offset, builder, mappings, reverseMappings,
+    sliceOp(transOp.getSrc(), offset, mappings, reverseMappings,
             partitionScheme);
     builder.setInsertionPoint(op);
     auto v = transOp.getResult();
@@ -902,18 +900,17 @@ Operation *sliceOp(Operation *op, int offset,
            "no operand info");
     unsigned opndIndx = partitionScheme.dotPartitionOperand[op];
     LDBG("slicing operand " << opndIndx << "\n");
-    sliceOp(dotOp.getOperand(opndIndx), offset, builder, mappings,
-            reverseMappings, partitionScheme);
+    sliceOp(dotOp.getOperand(opndIndx), offset, mappings, reverseMappings,
+            partitionScheme);
     if (dim == 0 && opndIndx == 1 || dim == 1 && opndIndx == 0) {
       // slice the other operand
       unsigned otherOpndIndx = 1 - opndIndx;
       LDBG("slicing operand " << otherOpndIndx << "\n");
-      sliceOp(dotOp.getOperand(otherOpndIndx), offset, builder, mappings,
+      sliceOp(dotOp.getOperand(otherOpndIndx), offset, mappings,
               reverseMappings, partitionScheme);
     }
     // Hanlde accumulator
-    sliceOp(dotOp.getC(), offset, builder, mappings, reverseMappings,
-            partitionScheme);
+    sliceOp(dotOp.getC(), offset, mappings, reverseMappings, partitionScheme);
     newOp = cloneAndSetResultType(op);
   } else if (auto forOp = dyn_cast<scf::ForOp>(op)) {
     // Add new loop arguments
@@ -924,8 +921,8 @@ Operation *sliceOp(Operation *op, int offset,
     for (unsigned i = 0; i < forOp.getInitArgs().size(); i++) {
       auto initArg = forOp.getInitArgs()[i];
       Value newInitArg;
-      auto newInitArgOp = sliceOp(initArg, offset, builder, mappings,
-                                  reverseMappings, partitionScheme);
+      auto newInitArgOp =
+          sliceOp(initArg, offset, mappings, reverseMappings, partitionScheme);
       if (auto bbArg = dyn_cast<BlockArgument>(initArg)) {
         // find the corresponding new block argument
         Block *parentBlock = bbArg.getOwner();
@@ -988,10 +985,9 @@ Operation *sliceOp(Operation *op, int offset,
     // Slice the yield op and update if results
     auto thenYieldOp = ifOp.thenYield();
     auto elseYieldOp = ifOp.elseYield();
-    auto newThenYieldOp = sliceOp(thenYieldOp, offset, builder, mappings,
+    auto newThenYieldOp = sliceOp(thenYieldOp, offset, mappings,
                                   reverseMappings, partitionScheme);
-    sliceOp(elseYieldOp, offset, builder, mappings, reverseMappings,
-            partitionScheme);
+    sliceOp(elseYieldOp, offset, mappings, reverseMappings, partitionScheme);
     assert(newThenYieldOp->getNumOperands() > ifOp->getNumResults() &&
            "no need to slice if op");
     // Clone ifOp with updated results but re-use the original regions.
@@ -1038,8 +1034,7 @@ Operation *sliceOp(Operation *op, int offset,
     int num = yieldOp.getNumOperands();
     for (int i = 0; i < num; i++) {
       auto operand = yieldOp.getOperand(i);
-      sliceOp(operand, offset, builder, mappings, reverseMappings,
-              partitionScheme);
+      sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
       if (auto newV = mappings.lookupOrNull(operand))
         yieldOp->insertOperands(op->getNumOperands(), newV);
     }
@@ -1048,8 +1043,7 @@ Operation *sliceOp(Operation *op, int offset,
     assert(reduceOp.getAxis() != dim &&
            "reduce should not happen on the partitioned dimension");
     for (Value operand : op->getOperands())
-      sliceOp(operand, offset, builder, mappings, reverseMappings,
-              partitionScheme);
+      sliceOp(operand, offset, mappings, reverseMappings, partitionScheme);
     newOp = cloneAndSetResultType(op);
     // recursively set async task ids for child ops
     newOp->walk(
@@ -1067,17 +1061,16 @@ Operation *sliceOp(Operation *op, int offset,
   return newOp;
 }
 
-Operation *sliceOp(Value v, int offset, OpBuilderWithAsyncTaskIds &builder,
-                   IRMapping &mappings, IRMapping &reverseMappings,
+Operation *sliceOp(Value v, int offset, IRMapping &mappings,
+                   IRMapping &reverseMappings,
                    DataPartitionScheme &partitionScheme) {
   if (auto op = v.getDefiningOp()) {
-    return sliceOp(op, offset, builder, mappings, reverseMappings,
-                   partitionScheme);
+    return sliceOp(op, offset, mappings, reverseMappings, partitionScheme);
   } else {
     assert(isa<BlockArgument>(v) && "value is not an operation or block ");
     auto bbArg = cast<BlockArgument>(v);
     Operation *bbAargOwner = bbArg.getOwner()->getParentOp();
-    return sliceOp(bbAargOwner, offset, builder, mappings, reverseMappings,
+    return sliceOp(bbAargOwner, offset, mappings, reverseMappings,
                    partitionScheme);
   }
 }
@@ -1177,7 +1170,6 @@ bool partitionTasks(triton::FuncOp &funcOp, int numConsumerGroups) {
 
   // Slice the ops.
   for (int i = 0; i < partitionScheme.numPartitions; i++) {
-    OpBuilderWithAsyncTaskIds builder(funcOp.getContext());
     IRMapping mappings, reverseMappings;
 
     LDBG("partitioning op for task " << i + 1 << ":\n");
@@ -1187,7 +1179,7 @@ bool partitionTasks(triton::FuncOp &funcOp, int numConsumerGroups) {
     int numOps = partitionScheme.ops.size();
     for (int j = 0; j < numOps; j++) {
       auto op = partitionScheme.ops[j];
-      sliceOp(op, i, builder, mappings, reverseMappings, partitionScheme);
+      sliceOp(op, i, mappings, reverseMappings, partitionScheme);
     }
 
     // clean up
