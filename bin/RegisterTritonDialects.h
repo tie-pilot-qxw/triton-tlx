@@ -110,6 +110,7 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::test::proton::registerTestScopeIdAllocationPass();
   mlir::triton::proton::registerConvertProtonToProtonGPU();
   mlir::triton::proton::registerAllocateProtonSharedMemoryPass();
+  mlir::triton::proton::registerAddProtonKernelArgPass();
 
   // NVGPU transform passes
   mlir::registerNVHopperTransformsPasses();
