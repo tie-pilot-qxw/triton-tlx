@@ -1114,7 +1114,6 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
             // When dot is used by a ForOp, if dot only has a single taskId and
             // the corresponding argument is only used by the same taskId, no
             // need to create a channel for userOp along operand user.second.
-            llvm::errs() << "channel user is ForOp\n";
             // Get the actual consumerTaskIds.
             for (auto item : llvm::enumerate(userFor.getInitArgs())) {
               if (item.value() == userOp->getOperand(user.second)) {
