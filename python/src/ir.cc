@@ -38,8 +38,9 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/SourceMgr.h"
 
-#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
 #include "third_party/tlx/dialect/include/IR/Dialect.h"
+
+namespace {
 
 namespace py = pybind11;
 using namespace mlir;
@@ -310,8 +311,9 @@ void init_triton_ir(py::module &&m) {
                     ::mlir::triton::instrument::TritonInstrumentDialect,
                     math::MathDialect, arith::ArithDialect, scf::SCFDialect,
                     ::mlir::gpu::GPUDialect, cf::ControlFlowDialect,
-                    ::mlir::triton::proton::ProtonDialect, LLVM::LLVMDialect,
-                    mlir::ub::UBDialect, ::mlir::triton::tlx::TLXDialect>();
+                    LLVM::LLVMDialect, mlir::ub::UBDialect,
+                    ::mlir::triton::tlx::TLXDialect>();
+
     mlir::LLVM::registerInlinerInterface(registry);
     registerBuiltinDialectTranslation(registry);
     registerLLVMDialectTranslation(registry);
@@ -723,6 +725,10 @@ void init_triton_ir(py::module &&m) {
       .def_property_readonly("type", &FuncOp::getFunctionType)
       .def("reset_type", &FuncOp::setType);
 
+  py::class_<mlir::OpBuilder>(m, "op_builder", py::module_local(),
+                              py::dynamic_attr())
+      .def(py::init<MLIRContext *>());
+
   py::class_<OpBuilder::InsertPoint>(m, "InsertPoint", py::module_local());
 
   // The static builderClass object persists throughout the compilation,
@@ -730,8 +736,8 @@ void init_triton_ir(py::module &&m) {
   static py::class_<TritonOpBuilder> builderClass(
       m, "builder", py::module_local(), py::dynamic_attr());
   builderClassPtr = &builderClass;
-  builderClass
-      .def(py::init<MLIRContext *>())
+  builderClass.def(py::init<MLIRContext *>())
+      .def("get_op_builder", &TritonOpBuilder::getBuilder, ret::reference)
       // getters
       .def("create_module",
            [](TritonOpBuilder &self) -> ModuleOp {
@@ -1808,14 +1814,6 @@ void init_triton_ir(py::module &&m) {
              threadId = self.create<arith::IndexCastOp>(
                  self.getBuilder().getI32Type(), threadId);
              return threadId;
-           })
-      // Proton Ops
-      .def("create_proton_record",
-           [](TritonOpBuilder &self, bool isStart,
-              const std::string &name) -> void {
-             auto nameAttr = StringAttr::get(self.getBuilder().getContext(),
-                                             llvm::StringRef(name));
-             self.create<mlir::triton::proton::RecordOp>(isStart, nameAttr);
            });
 
   py::class_<PassManager>(m, "pass_manager", py::module_local())
