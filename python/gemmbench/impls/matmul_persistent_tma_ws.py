@@ -95,20 +95,20 @@ class TmaAutoTuneHelper:
 
 @triton.autotune(
     configs=[
-        triton.Config(
-            {
-                "BLOCK_SIZE_M": 128,
-                "BLOCK_SIZE_N": 256,
-                "BLOCK_SIZE_K": 64,
-                "GROUP_SIZE_M": 8,
-                "MMA_CONSUMER": 1,
-                "EPILOG_CONSUMER": 1,
-            },
-            num_stages=1,
-            num_warps=4,
-            num_consumer_groups=1,
-            num_buffers_warp_spec=3,
-        ),
+        #triton.Config(
+        #    {
+        #        "BLOCK_SIZE_M": 128,
+        #        "BLOCK_SIZE_N": 256,
+        #        "BLOCK_SIZE_K": 64,
+        #        "GROUP_SIZE_M": 8,
+        #        "MMA_CONSUMER": 1,
+        #        "EPILOG_CONSUMER": 1,
+        #    },
+        #    num_stages=1,
+        #    num_warps=4,
+        #    num_consumer_groups=1,
+        #    num_buffers_warp_spec=3,
+        #),
         triton.Config(
             {
                 "BLOCK_SIZE_M": 128,

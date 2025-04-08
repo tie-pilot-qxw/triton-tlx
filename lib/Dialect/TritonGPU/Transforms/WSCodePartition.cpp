@@ -1081,14 +1081,14 @@ public:
 struct TmemDataChannel : Channel {
   ttng::TMEMAllocOp tmemAllocOp;
   ttng::TCGen5MMAOp tmemMmaOp;
-  Operation *tmemProdcuerOp;
+  Operation *tmemProducerOp;
 
   TmemDataChannel(int producer, SmallVector<int> &consumers,
                   ttng::TMEMAllocOp tmemAllocOp, ttng::TCGen5MMAOp tmemMmaOp,
                   Operation *tmemLoadOp, unsigned operandIdx,
                   unsigned numBuffers)
       : Channel(producer, consumers, tmemLoadOp, operandIdx, numBuffers),
-        tmemAllocOp(tmemAllocOp), tmemProdcuerOp(tmemAllocOp),
+        tmemAllocOp(tmemAllocOp), tmemProducerOp(tmemAllocOp),
         tmemMmaOp(tmemMmaOp) {
     assert(consumers.size() == 1 &&
            "TmemDataChannel must have a single consumer");
@@ -1097,7 +1097,7 @@ struct TmemDataChannel : Channel {
 
   ttng::TMEMAllocOp getAllocOp() { return tmemAllocOp; }
   ttng::TCGen5MMAOp getMmaOp() { return tmemMmaOp; }
-  virtual Operation *getSrcOp() { return tmemProdcuerOp; }
+  virtual Operation *getSrcOp() { return tmemProducerOp; }
 };
 
 // Find transitive users of the root op. Track through control flow ops (such as
@@ -1137,7 +1137,8 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
   mlir::DominanceInfo dom(funcOp);
   funcOp.walk([&](Operation *op) {
     if (isa<tt::LoadOp, tt::ExperimentalDescriptorLoadOp>(op) ||
-        isa<mlir::triton::DotOpInterface>(op)) {
+        isa<mlir::triton::DotOpInterface>(op) || isa<LocalAllocOp>(op)) {
+      // Create channel if LocalAlloc has different taskId from the use.
       auto producerTaskIds = getAsyncTaskIds(op);
       if (producerTaskIds.empty() || producerTaskIds.size() > 1) {
         LLVM_DEBUG({
@@ -1156,6 +1157,12 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
       auto producerOp = op;
       if (auto dotOp = dyn_cast<nvidia_gpu::TCGen5MMAOp>(op)) {
         auto accumulator = dotOp.getD();
+        // Usually tmem_alloc for the accumulator.
+        // FIXME: what if the definition of the accumulator is from a different
+        // taskId from the taskId of the gen5? Example:
+        //   %v = arith.mulf [2]
+        //   tmem_alloc [1, 2] %v
+        //   gen5 [1]
         producerOp = accumulator.getDefiningOp();
       }
 
@@ -1300,11 +1307,20 @@ void groupChannels(
   //    (dst1 and dst2 are in the same block, both have a single user, and
   //     dst1User == dst2User and dst1User is in the same block as dst1))
   auto channelCanBeMerged = [](Channel *c1, Channel *c2) -> bool {
+  // Can we group channel v with channel p? Channel v is between producer task
+  // 0 and consumer task 1, while channel p is between producer task 2 and
+  // consumer task 1. For the case of FA with gemm in task 1, TMAs in task 0,
+  // the rest in task 2.
+#if 0
+    return false;
+#endif
     if (c1->getSrcOp()->getBlock() != c2->getSrcOp()->getBlock())
       return false;
     Operation *dst1 = c1->getDstOp(), *dst2 = c2->getDstOp();
     if (dst1 == dst2)
       return true;
+    if (getAsyncTaskIds(c1->getSrcOp()) != getAsyncTaskIds(c2->getSrcOp()))
+      return false;
     // Check taskIds on dstOps.
     if (getAsyncTaskIds(dst1) != getAsyncTaskIds(dst2))
       return false;
@@ -2227,9 +2243,11 @@ void createToken(
     DenseMap<Channel *, CommChannel> &tokenMap) {
   OpBuilder builder(funcOp);
   builder.setInsertionPointToStart(&(funcOp.getBody().front()));
+  DenseMap<nvidia_gpu::TCGen5MMAOp, Channel *> gen5Barriers;
   for (auto *key : orderedChannels) {
     auto it = channelsGroupedByConsumers.find(key);
     Channel *channel = it->second.front();
+    // Only need token for the representing channel.
     if (!channelReuse.count(channel))
       continue;
 
@@ -2243,11 +2261,20 @@ void createToken(
           createBarrierAlloc(funcOp, channel->numBuffers);
     }
 
+    // For channels associated with acc of gen5, consumerOp is not the gen5.
+    bool useGen5Barrier = isa<nvidia_gpu::TCGen5MMAOp>(consumerOp) &&
+                          producerOp->getBlock() == consumerOp->getBlock();
+    if (useGen5Barrier) {
+      auto mmaOp = cast<nvidia_gpu::TCGen5MMAOp>(consumerOp);
+      if (gen5Barriers.count(mmaOp) && gen5Barriers[mmaOp] != channel)
+        useGen5Barrier = false;
+    }
     for (auto consumerAsyncTaskId : channel->relation.second) {
       // No token is needed for a TMA <-> TCGen5MMAOp channel
       if (!isa<tt::ExperimentalDescriptorLoadOp>(producerOp) ||
-          !isa<nvidia_gpu::TCGen5MMAOp>(consumerOp)) {
+          !useGen5Barrier) {
         ttng::TokenLoadType tokenLoadType;
+        assert(copyOpMap.find(channel) != copyOpMap.end());
         auto copyOp = copyOpMap.find(channel)->second.first;
         if (isa<ttg::AsyncCopyGlobalToLocalOp>(copyOp)) {
           tokenLoadType = ttng::TokenLoadType::AsyncLoadOp;
@@ -2270,9 +2297,11 @@ void createToken(
         commChannel.tokens[consumerAsyncTaskId] = v;
       }
 
-      if (isa<nvidia_gpu::TCGen5MMAOp>(consumerOp)) {
+      // Check to make sure consumerOp is in the same block as srcOp
+      if (useGen5Barrier) {
         Value v = createBarrierAlloc(funcOp, channel->numBuffers);
         commChannel.consumerBarrier = v;
+        gen5Barriers[cast<nvidia_gpu::TCGen5MMAOp>(consumerOp)] = channel;
       }
     }
 
@@ -2322,6 +2351,23 @@ static ttng::TMEMAllocOp createTMemAlloc(OpBuilder &builder,
                                            accMemDescType, nullptr);
 }
 
+// Lift out LocalAlloc.
+static LocalAllocOp createLocalAlloc(OpBuilder &builder,
+                                     LocalAllocOp oldAllocOp, int numBuffers) {
+  Location loc = oldAllocOp.getLoc();
+  auto oldRetType = oldAllocOp.getType();
+  SmallVector<int64_t> shape = {oldRetType.getShape().begin(),
+                                oldRetType.getShape().end()};
+  if (numBuffers > 1) {
+    shape.insert(shape.begin(), numBuffers);
+  }
+  LDBG("Lift out local_alloc for a channel with local_alloc as src");
+  Type memDescType = triton::gpu::MemDescType::get(
+      shape, oldRetType.getElementType(), oldRetType.getEncoding(),
+      oldRetType.getMemorySpace(), /*mutableMemory=*/true);
+  return builder.create<ttg::LocalAllocOp>(oldAllocOp.getLoc(), memDescType);
+}
+
 // Create a buffer array for each producer op, if the producer is in a ForOp,
 // the buffer array will contain numBuffers.
 DenseMap<Channel *, Value> createBuffer(
@@ -2365,6 +2411,7 @@ DenseMap<Channel *, Value> createBuffer(
       buffer = createTMemAlloc(builder, oldTMemAllocOp, numBuffers);
     } else if (auto tensorType =
                    dyn_cast<RankedTensorType>(srcValue.getType())) {
+      // Channel for loads: srcOp will be load, srcValue's type will be tensor.
       // Get basic information from tensorType
       auto order = ttg::getOrder(tensorType);
       auto CTALayout = ttg::getCTALayout(tensorType.getEncoding());
@@ -2374,8 +2421,10 @@ DenseMap<Channel *, Value> createBuffer(
       auto sliceShape = tensorType.getShape();
       auto sharedLayout = ttg::NVMMASharedEncodingAttr::get(
           context, sliceShape, order, CTALayout, elemType, /*fp4Padded*/ false);
+#if 0
       auto sliceType =
           RankedTensorType::get(sliceShape, elemType, sharedLayout);
+#endif
 
       // Get shape, layout and type of the complete buffer
       SmallVector<int64_t> bufferShape(sliceShape.begin(), sliceShape.end());
@@ -2385,12 +2434,17 @@ DenseMap<Channel *, Value> createBuffer(
         bufferShape.insert(bufferShape.begin(), 1);
       Attribute sharedMemorySpace =
           triton::gpu::SharedMemorySpaceAttr::get(context);
+#if 0
       auto bufferType =
           RankedTensorType::get(bufferShape, elemType, sharedLayout);
+#endif
       Type memdescType =
           ttg::MemDescType::get(bufferShape, elemType, sharedLayout,
                                 sharedMemorySpace, /*mutableMemory*/ true);
       buffer = builder.create<ttg::LocalAllocOp>(funcOp.getLoc(), memdescType);
+    } else if (auto localAlloc = dyn_cast<LocalAllocOp>(srcOp)) {
+      // Lift out LocalAlloc.
+      buffer = createLocalAlloc(builder, localAlloc, numBuffers);
     } else {
       llvm_unreachable("Unexpected result type");
     }
@@ -2488,27 +2542,40 @@ createLocalCopy(const DenseMap<Channel *, Value> &bufferMap, Channel *channel,
   MLIRContext *context = srcOp->getContext();
   auto buffer = bufferMap.find(channel)->second;
 
+  // srcOp can be LocalAlloc, srcValue can be memDescType.
+  ttg::MemDescType subviewTy;
   Value srcValue = channel->getSrcOperand();
-  auto tensorType = dyn_cast<RankedTensorType>(srcValue.getType());
-  if (!tensorType)
-    return {nullptr, nullptr};
-  // Get basic information from tensorType
-  auto order = ttg::getOrder(tensorType);
-  auto CTALayout = ttg::getCTALayout(tensorType.getEncoding());
-  auto elemType = tensorType.getElementType();
+  unsigned rank;
+  if (auto oldAllocOp = dyn_cast<LocalAllocOp>(srcOp)) {
+    auto oldRetType = oldAllocOp.getType();
+    subviewTy = triton::gpu::MemDescType::get(
+        oldRetType.getShape(), oldRetType.getElementType(),
+        oldRetType.getEncoding(), oldRetType.getMemorySpace(),
+        /*mutableMemory=*/true);
+    rank = oldRetType.getRank();
+  } else {
+    auto tensorType = dyn_cast<RankedTensorType>(srcValue.getType());
+    if (!tensorType)
+      return {nullptr, nullptr};
+    // Get basic information from tensorType
+    auto order = ttg::getOrder(tensorType);
+    auto CTALayout = ttg::getCTALayout(tensorType.getEncoding());
+    auto elemType = tensorType.getElementType();
 
-  // Get shape, layout and type of a slice
-  auto sliceShape = tensorType.getShape();
-  auto sharedLayout = ttg::NVMMASharedEncodingAttr::get(
-      context, sliceShape, order, CTALayout, elemType, /*fp4Padded*/ false);
-  auto sliceType = RankedTensorType::get(sliceShape, elemType, sharedLayout);
+    // Get shape, layout and type of a slice
+    auto sliceShape = tensorType.getShape();
+    auto sharedLayout = ttg::NVMMASharedEncodingAttr::get(
+        context, sliceShape, order, CTALayout, elemType, /*fp4Padded*/ false);
+    auto sliceType = RankedTensorType::get(sliceShape, elemType, sharedLayout);
 
-  Attribute sharedMemorySpace =
-      triton::gpu::SharedMemorySpaceAttr::get(context);
-  ttg::MemDescType subviewTy =
-      ttg::MemDescType::get(sliceType.getShape(), sliceType.getElementType(),
-                            sliceType.getEncoding(), sharedMemorySpace,
-                            /*mutableMemory=*/true);
+    Attribute sharedMemorySpace =
+        triton::gpu::SharedMemorySpaceAttr::get(context);
+    subviewTy =
+        ttg::MemDescType::get(sliceType.getShape(), sliceType.getElementType(),
+                              sliceType.getEncoding(), sharedMemorySpace,
+                              /*mutableMemory=*/true);
+    rank = sliceType.getRank();
+  }
 
   // Consumer part.
   OpBuilderWithAsyncTaskIds builder(dstOp);
@@ -2516,30 +2583,54 @@ createLocalCopy(const DenseMap<Channel *, Value> &bufferMap, Channel *channel,
   builder.setInsertionPoint(dstOp);
   Value zero = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
       dstOp->getLoc(), 0, 32);
-  SmallVector<Value> loadOffsets(sliceType.getRank() + 1, zero);
+  SmallVector<Value> loadOffsets(rank + 1, zero);
   loadOffsets[0] = dstBufferIdx;
   auto dstView = builder.createWithAsyncTaskIds<ttg::MemDescSubviewOp>(
       dstOp->getLoc(), subviewTy, buffer, loadOffsets);
-  auto sharedLoad = builder.createWithAsyncTaskIds<ttg::LocalLoadOp>(
-      dstOp->getLoc(), srcValue.getType(), dstView);
-  srcValue.replaceAllUsesWith(sharedLoad.getResult());
+  Operation *consumerOp = nullptr;
+  if (auto oldAllocOp = dyn_cast<LocalAllocOp>(srcOp)) {
+    // In the case of local_alloc as producer, create subview. Instead of using
+    // local_alloc, use the subview. Also for local_store at producer, use the
+    // src operand of alloc.
+    srcValue.replaceAllUsesWith(dstView);
+    LLVM_DEBUG({
+      LDBG("-- createLocalCopy replace LocalAlloc with subview ");
+      srcOp->dump();
+    });
+    srcValue = oldAllocOp.getSrc();
+    consumerOp = dstView;
+  } else {
+    auto sharedLoad = builder.createWithAsyncTaskIds<ttg::LocalLoadOp>(
+        dstOp->getLoc(), srcValue.getType(), dstView);
+    srcValue.replaceAllUsesWith(sharedLoad.getResult());
+    LLVM_DEBUG({
+      LDBG("-- createLocalCopy replace srcOp with LocalLoad ");
+      srcOp->dump();
+    });
+    consumerOp = sharedLoad;
+  }
 
   // Producer part. Create local_store for new producers.
   builder.setAsynTaskIdsFromArray(channel->relation.first);
   builder.setInsertionPoint(srcOp->getParentOp());
   zero = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(srcOp->getLoc(),
                                                               0, 32);
-  SmallVector<Value> storeOffsets(sliceType.getRank() + 1, zero);
+  SmallVector<Value> storeOffsets(rank + 1, zero);
   storeOffsets[0] = srcBufferIdx;
   builder.setInsertionPointAfter(srcOp);
   auto srcView = builder.createWithAsyncTaskIds<ttg::MemDescSubviewOp>(
       srcOp->getLoc(), subviewTy, buffer, storeOffsets);
-  // Create local_alloc
+  // Producer becomes local_store.
   Operation *copy = builder.createWithAsyncTaskIds<ttg::LocalStoreOp>(
       srcOp->getLoc(), srcValue, srcView);
-  return {copy, sharedLoad};
+  // Should we erase the srcOp?
+  if (auto oldAllocOp = dyn_cast<LocalAllocOp>(srcOp)) {
+    // oldAllocOp.erase();
+  }
+  return {copy, consumerOp};
 }
 
+// Type must be MemDescType.
 static Value createBufferView(OpBuilderWithAsyncTaskIds &builder, Value alloc,
                               Value idx) {
   assert(isa<triton::gpu::MemDescType>(alloc.getType()) &&
@@ -2580,15 +2671,38 @@ createTMEMCopy(const DenseMap<Channel *, Value> &bufferMap, Channel *channel,
   // Create mem desc subview for the right buffer.
   builder.setAsyncTaskIdsFromOp(oldTMemAllocOp);
   auto srcView = createBufferView(builder, newTMemAllocOp, srcBufferIdx);
-  builder.setAsyncTaskIdsFromOp(tmemChannel->getMmaOp());
+  // SrcOp can be tMemAlloc, dstOp can be tMemLoad. tmemStore should be
+  // using oldTMemAllocOp.getSrc()'s taskId.
+  // For GEMM, we have mma in task 1, alloc in [1, 2], alloc.getSrc() in [0, 1,
+  // 2] For FA, we have two tmem channels, 1st dot, alloc has no Src; 2nd dot,
+  // alloc in [1, 2], alloc.getSrc() in [2], mma in task 1. For 2nd dot, we want
+  // tmem_store in task 2.
+  Operation *producerOp = tmemChannel->getMmaOp();
+  auto taskIds = getAsyncTaskIds(producerOp);
+  assert(taskIds.size() == 1);
+  if (oldTMemAllocOp.getSrc()) {
+    // If src is in a different task as mma, use src's task.
+    auto *srcOp = oldTMemAllocOp.getSrc().getDefiningOp();
+    if (!hasAsyncTaskId(srcOp, taskIds[0]))
+      producerOp = oldTMemAllocOp.getSrc().getDefiningOp();
+  }
+  builder.setAsyncTaskIdsFromOp(producerOp);
   Value vTrue = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
       oldTMemAllocOp.getLoc(), 1, 1);
-  auto tmemStoreOp = builder.createWithAsyncTaskIds<ttng::TMEMStoreOp>(
-      oldTMemAllocOp.getLoc(), srcView, oldTMemAllocOp.getSrc(), vTrue);
+  if (oldTMemAllocOp.getSrc()) {
+    auto tmemStoreOp = builder.createWithAsyncTaskIds<ttng::TMEMStoreOp>(
+        oldTMemAllocOp.getLoc(), srcView, oldTMemAllocOp.getSrc(), vTrue);
+    oldTMemAllocOp->replaceAllUsesWith(srcView.getDefiningOp());
+    oldTMemAllocOp.erase();
+    tmemChannel->tmemProducerOp = tmemStoreOp;
+    return {tmemStoreOp, channel->getDstOp()};
+  }
+
   oldTMemAllocOp->replaceAllUsesWith(srcView.getDefiningOp());
   oldTMemAllocOp.erase();
-  tmemChannel->tmemProdcuerOp = tmemStoreOp;
-  return {tmemStoreOp, channel->getDstOp()};
+  // tmemProducerOp is the new srcOp for the channel since tmemAlloc is erased.
+  tmemChannel->tmemProducerOp = tmemChannel->getMmaOp();
+  return {tmemChannel->getMmaOp(), channel->getDstOp()};
 }
 
 static int getTMALoadSize(tt::ExperimentalDescriptorLoadOp &tmaLoad) {
@@ -2704,6 +2818,10 @@ optimizeTMALoads(OpBuilderWithAsyncTaskIds &builder,
         builder, tmaLoad.getType(), buffer, bufferIdxExtract, false);
     auto sharedLoad = builder.createWithAsyncTaskIds<ttg::LocalLoadOp>(
         loc, tmaLoad.getType(), pipelineBuffer);
+    LLVM_DEBUG({
+      LDBG("-- optimizeTMALoads replace tmaLoad with LocalLoad ");
+      tmaLoad.dump();
+    });
 
     Value loadResult = tmaLoad.getResult();
     tmaLoad.getResult().replaceAllUsesWith(sharedLoad.getResult());
@@ -2718,7 +2836,7 @@ optimizeTMALoads(OpBuilderWithAsyncTaskIds &builder,
 // (TMEM load).
 ttng::WaitBarrierOp desyncTCGen5MMAOp(
     OpBuilderWithAsyncTaskIds &builder, nvidia_gpu::TCGen5MMAOp mmaOp,
-    Value barrierAlloc, Value bufferIdx, Value phase, unsigned numBuffers,
+    Value barrierAlloc, Value bufferIdx, Value inPhase, unsigned numBuffers,
     Operation *headProducer, DenseSet<Operation *> &opsWithChannels,
     SmallVector<Operation *> &opsWithBufferReuse, mlir::DominanceInfo &dom) {
   // Attach the barrier as an operand of the mma op.
@@ -2728,7 +2846,8 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
       getBarrierForPipelineStage(builder, barrierAlloc, bufferIdx);
   mmaOp.getBarrierMutable().assign(consumerBarrier);
 
-  // Create a wait_barrier before the producer.
+  // Create a wait_barrier before the producer. headProducer is usually srcOp,
+  // which can be the mma or the tmem_store.
   builder.setInsertionPoint(headProducer);
   builder.setAsyncTaskIdsFromOp(headProducer);
   auto producerBarrier =
@@ -2736,12 +2855,16 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
   // curPhase = curPhase xor True for emptyBarrier.
   auto loc = headProducer->getLoc();
   Value _1_1b = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 1);
-  phase =
-      builder.createWithAsyncTaskIds<mlir::arith::XOrIOp>(loc, phase, _1_1b);
+  Value phase =
+      builder.createWithAsyncTaskIds<mlir::arith::XOrIOp>(loc, inPhase, _1_1b);
   phase = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
       loc, builder.getI32Type(), phase);
   builder.createWithAsyncTaskIds<ttng::WaitBarrierOp>(loc, producerBarrier,
                                                       phase);
+  LLVM_DEBUG({
+    LDBG("desync: create wait_barrier for producer ");
+    producerBarrier.dump();
+  });
 
   // Create a wait_barrier before the tmem load.
   SetVector<std::pair<Operation *, unsigned>> users;
@@ -2761,6 +2884,7 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
     }
     builder.setInsertionPoint(user);
     builder.setAsyncTaskIdsFromOp(mmaOp);
+
     // If user and mmaOp are in the same block, we can use the same barrier.
     if (user->getBlock() != mmaOp->getBlock()) {
       // Compute the barrier from the last consumer instance
@@ -2771,10 +2895,30 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
           user->getLoc(), builder.getI32Type(), phase);
       consumerBarrier =
           getBarrierForPipelineStage(builder, barrierAlloc, bufferIdx);
+      LLVM_DEBUG({
+        LDBG("desync: create new consumerBarrier for consumer");
+        user->dump();
+        consumerBarrier.dump();
+      });
+    } else {
+      // mmaOp can be in a different task from headProducer. mmaOp can be in a
+      // different task from user? no one is using phase?
+      auto loc = user->getLoc();
+      Value _1_1b =
+          builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 1);
+      phase = builder.createWithAsyncTaskIds<mlir::arith::XOrIOp>(loc, inPhase,
+                                                                  _1_1b);
+      phase = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
+          loc, builder.getI32Type(), phase);
     }
 
     // TODO: if there are multiple users of the mma op, we need to barrier
     // before the first user.
+    LLVM_DEBUG({
+      LDBG("desync: create wait_barrier for consumer");
+      user->dump();
+      consumerBarrier.dump();
+    });
     return builder.createWithAsyncTaskIds<ttng::WaitBarrierOp>(
         user->getLoc(), consumerBarrier, phase);
   }
@@ -2861,6 +3005,7 @@ void insertAsyncComm(
   };
 
   DenseMap<nvidia_gpu::TCGen5MMAOp, ttng::WaitBarrierOp> tmemWaitBarriers;
+  DenseMap<nvidia_gpu::TCGen5MMAOp, Value> gen5Barriers;
 
   // Postpont TMEM channels until all SMEM channels are processed.
   // TODO: Reorder the channels in channelsGroupedByConsumers in dependency
@@ -2885,6 +3030,7 @@ void insertAsyncComm(
     DenseSet<Operation *> producerOps;
     DenseSet<Operation *> consumerOps;
     for (auto &c : kv.second) {
+      assert(copyOpMap.find(c) != copyOpMap.end());
       auto pcOp = copyOpMap.find(c)->second;
       producerOps.insert(pcOp.first);
       consumerOps.insert(pcOp.second);
@@ -2978,14 +3124,31 @@ void insertAsyncComm(
       }
     }
 
+    LLVM_DEBUG({
+      LDBG("SrcOp of master Channel ");
+      masterChannel->getSrcOp()->dump();
+      LDBG("DstOp of master Channel ");
+      masterChannel->getDstOp()->dump();
+    });
+
     // Desynchronize TCGen5MMAOp. Set up consumer release and producer acquire.
-    if (auto mmaOp = dyn_cast<nvidia_gpu::TCGen5MMAOp>(
-            getUniqueActualConsumer(masterChannel->getDstOp()))) {
+    auto mmaOp = dyn_cast<nvidia_gpu::TCGen5MMAOp>(
+        getUniqueActualConsumer(masterChannel->getDstOp()));
+    if (mmaOp && commChannel.consumerBarrier) {
+      LLVM_DEBUG({
+        LDBG("unique actual consumer is gen5 mma ");
+        mmaOp->dump();
+      });
       auto tmemWaitBarrier = desyncTCGen5MMAOp(
           builder, mmaOp, *commChannel.consumerBarrier, bufferIdx, phase,
           masterChannel->numBuffers, headProducer, opsWithChannels,
           opsWithBufferReuse, dom);
       tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
+#if 1
+      if (gen5Barriers.count(mmaOp))
+        assert(gen5Barriers[mmaOp] == *commChannel.consumerBarrier);
+#endif
+      gen5Barriers[mmaOp] = *commChannel.consumerBarrier;
     }
 
     builder.setAsynTaskIdsFromArray(masterChannel->relation.first);
@@ -2996,6 +3159,10 @@ void insertAsyncComm(
         builder.setInsertionPoint(producerAcquirePoint);
         builder.createWithAsyncTaskIds<ttng::ProducerAcquireOp>(
             headProducer->getLoc(), token.second, bufferIdx, phase);
+        LLVM_DEBUG({
+          LDBG("create ProducerAcquire ");
+          token.second.dump();
+        });
       }
 
       // Insert ProducerCommitOp if producer is not TMA. For TMA, TMA lowering
@@ -3014,6 +3181,10 @@ void insertAsyncComm(
         builder.setInsertionPointAfter(producerCommitPoint);
         builder.createWithAsyncTaskIds<ttng::ProducerCommitOp>(
             tailProducer->getLoc(), token.second, bufferIdx);
+        LLVM_DEBUG({
+          LDBG("create ProducerCommit ");
+          token.second.dump();
+        });
       }
     }
 
@@ -3025,6 +3196,10 @@ void insertAsyncComm(
         builder.setInsertionPoint(consumerWaitPoint);
         builder.createWithAsyncTaskIds<ttng::ConsumerWaitOp>(
             headConsumer->getLoc(), token.second, bufferIdx, phase);
+        LLVM_DEBUG({
+          LDBG("create ConsumerWait ");
+          token.second.dump();
+        });
       }
 
       // Insert ConsumerReleaseOp, if consumer is not a TCGen5MMAOp. For
@@ -3035,6 +3210,10 @@ void insertAsyncComm(
         builder.setInsertionPointAfter(consumerReleasePoint);
         builder.createWithAsyncTaskIds<ttng::ConsumerReleaseOp>(
             consumerReleasePoint->getLoc(), token.second, bufferIdx);
+        LLVM_DEBUG({
+          LDBG("create ConsumerRelease ");
+          token.second.dump();
+        });
       }
     }
 
@@ -3128,6 +3307,11 @@ void insertAsyncCopy(
     } else if (domininatingChannel->channelKind == DataChannelKind::TMEM) {
       producerConsumerOps =
           createTMEMCopy(bufferMap, domininatingChannel, bufferIdx, bufferIdx);
+      LLVM_DEBUG({
+        LDBG("after createTMEMCopy producerOp ");
+        producerConsumerOps.first->dump();
+        domininatingChannel->getSrcOp()->dump();
+      });
     } else {
       assert(!isa<ttg::LocalLoadOp>(srcOp) &&
              "LocalLoadOp buffer should be reused");
@@ -3141,6 +3325,8 @@ void insertAsyncCopy(
   }
 }
 
+// If there is no use of LocalAlloc, the pair will not be deleted. A later
+// pass should clean up.
 void foldLocalLoads(triton::FuncOp funcOp) {
   // If loadResult has a single use which is LocalAlloc, we can get rid of
   // sharedLoad and replace all uses of LocalAlloc with viewLoad.

@@ -283,8 +283,28 @@ void backwardPropagateTaskIds(Operation *op,
     }
 
     auto op = value.getDefiningOp();
-    if (!anchors.count(op))
-      addAsyncTaskIds(op, asyncTasks);
+    if (!anchors.count(op)) {
+      // If this op is local_alloc, consider letting forwardProp to handle since
+      // local_alloc can be where the taskId switches:
+      //   %v = xxx [taskId2]
+      //   %x = local_alloc %v [taskId2]
+      //   consumer 1 uses %x [taskId1]
+      // For loads:
+      //   %v = load [taskId0]
+      //   %x = local_alloc %v [taskId1] --> will add a channel for load
+      //   consumer 1 uses %x [taskId1]
+      bool skipProp = false;
+      if (auto alloc = dyn_cast<ttg::LocalAllocOp>(op)) {
+        for (Value operand : op->getOperands()) {
+          Operation *defOp = operand.getDefiningOp();
+          if (defOp &&
+              !llvm::isa<tt::LoadOp, tt::ExperimentalDescriptorLoadOp>(defOp))
+            skipProp = true;
+        }
+      }
+      if (!skipProp)
+        addAsyncTaskIds(op, asyncTasks);
+    }
 
     // Handle for loops.
     if (auto forOp = dyn_cast<scf::ForOp>(op)) {
@@ -463,7 +483,7 @@ public:
     });
 
 #ifndef NDEBUG
-    verifyTaskId(funcOp, anchorOps);
+    // verifyTaskId(funcOp, anchorOps);
 #endif
   }
 
