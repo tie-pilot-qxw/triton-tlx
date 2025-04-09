@@ -1307,13 +1307,10 @@ void groupChannels(
   //    (dst1 and dst2 are in the same block, both have a single user, and
   //     dst1User == dst2User and dst1User is in the same block as dst1))
   auto channelCanBeMerged = [](Channel *c1, Channel *c2) -> bool {
-  // Can we group channel v with channel p? Channel v is between producer task
-  // 0 and consumer task 1, while channel p is between producer task 2 and
-  // consumer task 1. For the case of FA with gemm in task 1, TMAs in task 0,
-  // the rest in task 2.
-#if 0
-    return false;
-#endif
+    // Can we group channel v with channel p? Channel v is between producer task
+    // 0 and consumer task 1, while channel p is between producer task 2 and
+    // consumer task 1. For the case of FA with gemm in task 1, TMAs in task 0,
+    // the rest in task 2.
     if (c1->getSrcOp()->getBlock() != c2->getSrcOp()->getBlock())
       return false;
     Operation *dst1 = c1->getDstOp(), *dst2 = c2->getDstOp();
@@ -2421,10 +2418,6 @@ DenseMap<Channel *, Value> createBuffer(
       auto sliceShape = tensorType.getShape();
       auto sharedLayout = ttg::NVMMASharedEncodingAttr::get(
           context, sliceShape, order, CTALayout, elemType, /*fp4Padded*/ false);
-#if 0
-      auto sliceType =
-          RankedTensorType::get(sliceShape, elemType, sharedLayout);
-#endif
 
       // Get shape, layout and type of the complete buffer
       SmallVector<int64_t> bufferShape(sliceShape.begin(), sliceShape.end());
@@ -2434,10 +2427,6 @@ DenseMap<Channel *, Value> createBuffer(
         bufferShape.insert(bufferShape.begin(), 1);
       Attribute sharedMemorySpace =
           triton::gpu::SharedMemorySpaceAttr::get(context);
-#if 0
-      auto bufferType =
-          RankedTensorType::get(bufferShape, elemType, sharedLayout);
-#endif
       Type memdescType =
           ttg::MemDescType::get(bufferShape, elemType, sharedLayout,
                                 sharedMemorySpace, /*mutableMemory*/ true);
@@ -2901,8 +2890,7 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
         consumerBarrier.dump();
       });
     } else {
-      // mmaOp can be in a different task from headProducer. mmaOp can be in a
-      // different task from user? no one is using phase?
+      // mmaOp can be in a different task from headProducer.
       auto loc = user->getLoc();
       Value _1_1b =
           builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 1);
