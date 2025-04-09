@@ -3133,10 +3133,8 @@ void insertAsyncComm(
           masterChannel->numBuffers, headProducer, opsWithChannels,
           opsWithBufferReuse, dom);
       tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
-#if 1
       if (gen5Barriers.count(mmaOp))
         assert(gen5Barriers[mmaOp] == *commChannel.consumerBarrier);
-#endif
       gen5Barriers[mmaOp] = *commChannel.consumerBarrier;
     }
 
