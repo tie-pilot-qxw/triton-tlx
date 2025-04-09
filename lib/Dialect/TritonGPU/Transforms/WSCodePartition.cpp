@@ -1158,10 +1158,11 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
       if (auto dotOp = dyn_cast<nvidia_gpu::TCGen5MMAOp>(op)) {
         auto accumulator = dotOp.getD();
         // Usually tmem_alloc for the accumulator.
-        // FIXME: what if the definition of the accumulator is from a different
-        // taskId from the taskId of the gen5? Example:
-        //   %v = arith.mulf [2]
-        //   tmem_alloc [1, 2] %v
+        // For FA, when mma is in task 1, the rest of compuation in task 2, we
+        // have acc' = alpha * acc in task 2 dot(p, v, acc') in task 1 Here
+        // accumulator.getDefiningOp() is in a different task from dot
+        //   %p = arith.mulf [2]
+        //   tmem_alloc [1, 2] %p
         //   gen5 [1]
         producerOp = accumulator.getDefiningOp();
       }
