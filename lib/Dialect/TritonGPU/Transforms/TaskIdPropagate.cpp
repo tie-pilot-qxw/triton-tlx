@@ -294,7 +294,7 @@ void backwardPropagateTaskIds(Operation *op,
       //   %x = local_alloc %v [taskId1] --> will add a channel for load
       //   consumer 1 uses %x [taskId1]
       bool skipProp = false;
-      if (auto alloc = dyn_cast<ttg::LocalAllocOp>(op)) {
+      if (isa<ttg::LocalAllocOp>(op) || isa<ttng::TMEMAllocOp>(op)) {
         for (Value operand : op->getOperands()) {
           Operation *defOp = operand.getDefiningOp();
           if (defOp &&

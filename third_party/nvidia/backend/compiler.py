@@ -284,6 +284,7 @@ class CUDABackend(BaseBackend):
             passes.ttgpuir.add_optimize_accumulator_init(pm)
             if opt.num_consumer_groups > 0:
                 nvidia.passes.ttnvgpuir.add_keep_acc_in_tmem(pm)
+            nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
             passes.ttgpuir.add_ws_task_partition(pm, opt.num_consumer_groups)
             passes.ttgpuir.add_taskid_propagate(pm, opt.num_consumer_groups)
             passes.ttgpuir.add_ws_data_partition(pm, opt.num_consumer_groups)
@@ -291,7 +292,7 @@ class CUDABackend(BaseBackend):
                                                  opt.reg_dec_producer, opt.reg_inc_consumer)
             passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled)
             passes.ttgpuir.add_combine_tensor_select_and_if(pm)
-            nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
+            # nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
             nvidia.passes.ttnvgpuir.add_keep_acc_in_tmem(pm)
             passes.ttgpuir.add_ws_lowering(pm, opt.num_consumer_groups)
             passes.common.add_canonicalizer(pm)

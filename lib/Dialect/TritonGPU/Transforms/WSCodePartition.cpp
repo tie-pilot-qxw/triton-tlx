@@ -1097,6 +1097,8 @@ struct TmemDataChannel : Channel {
 
   ttng::TMEMAllocOp getAllocOp() { return tmemAllocOp; }
   ttng::TCGen5MMAOp getMmaOp() { return tmemMmaOp; }
+  // DstOp is usually tmem_load, tmemProducerOp can be updated in
+  // createTMEMCopy.
   virtual Operation *getSrcOp() { return tmemProducerOp; }
 };
 
@@ -1137,7 +1139,8 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
   mlir::DominanceInfo dom(funcOp);
   funcOp.walk([&](Operation *op) {
     if (isa<tt::LoadOp, tt::ExperimentalDescriptorLoadOp>(op) ||
-        isa<mlir::triton::DotOpInterface>(op) || isa<LocalAllocOp>(op)) {
+        isa<mlir::triton::DotOpInterface>(op) || isa<LocalAllocOp>(op) ||
+        isa<ttng::TMEMAllocOp>(op)) {
       // Create channel if LocalAlloc has different taskId from the use.
       auto producerTaskIds = getAsyncTaskIds(op);
       if (producerTaskIds.empty() || producerTaskIds.size() > 1) {
@@ -1191,6 +1194,9 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
           auto consumerTaskIds = getAsyncTaskIds(userOp);
           if (consumerTaskIds.empty())
             continue;
+          if (consumerTaskIds.size() == 1 &&
+              consumerTaskIds[0] == producerTaskId)
+            continue;
           // Remove producer task id from consumerTaskIds.
           auto iter = std::remove(consumerTaskIds.begin(),
                                   consumerTaskIds.end(), producerTaskId);
@@ -1204,6 +1210,15 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
                     producerTaskId, consumerTaskIds, tmemAllocOp, dotOp, userOp,
                     user.second, 2));
               }
+            } else if (auto tmemAllocOp =
+                           dyn_cast<ttng::TMEMAllocOp>(producerOp)) {
+              // Always use two buffers for TMEM channels.
+              // Usually this feeds into a dotOp, find the dotOp of tmem_load.
+              assert(isa<nvidia_gpu::TCGen5MMAOp>(userOp));
+              channels.push_back(std::make_unique<TmemDataChannel>(
+                  producerTaskId, consumerTaskIds, tmemAllocOp,
+                  dyn_cast<nvidia_gpu::TCGen5MMAOp>(userOp), userOp,
+                  user.second, 2));
             } else {
               channels.push_back(std::make_unique<Channel>(
                   producerTaskId, consumerTaskIds, userOp, user.second,
@@ -2264,6 +2279,8 @@ void createToken(
                           producerOp->getBlock() == consumerOp->getBlock();
     if (useGen5Barrier) {
       auto mmaOp = cast<nvidia_gpu::TCGen5MMAOp>(consumerOp);
+      // If the gen5 barrier for this mmaOp is already used for another channel,
+      // do not use it for this channel.
       if (gen5Barriers.count(mmaOp) && gen5Barriers[mmaOp] != channel)
         useGen5Barrier = false;
     }
@@ -2274,6 +2291,10 @@ void createToken(
         ttng::TokenLoadType tokenLoadType;
         assert(copyOpMap.find(channel) != copyOpMap.end());
         auto copyOp = copyOpMap.find(channel)->second.first;
+        LLVM_DEBUG({
+          LDBG("-- createToken: copyOp ");
+          copyOp->dump();
+        });
         if (isa<ttg::AsyncCopyGlobalToLocalOp>(copyOp)) {
           tokenLoadType = ttng::TokenLoadType::AsyncLoadOp;
         } else if (isa<ExperimentalDescriptorLoadOp>(copyOp)) {
