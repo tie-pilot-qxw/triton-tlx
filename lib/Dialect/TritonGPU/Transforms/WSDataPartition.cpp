@@ -552,6 +552,9 @@ bool computePartitionScheme(triton::FuncOp &funcOp,
     }
   });
 
+  if (dots.empty())
+    return true;
+
   // Checking if all dots can be partitioned in the same way
   int numWarps = mlir::triton::gpu::lookupNumWarps(funcOp);
   for (auto op : dots) {
@@ -1305,14 +1308,15 @@ void doDeepCleanup(triton::FuncOp &funcOp,
   } while (!opsToDelete.empty());
 }
 
-void partitionTasks(triton::FuncOp &funcOp, int numConsumerGroups) {
-
+bool partitionTasks(triton::FuncOp &funcOp, int numConsumerGroups) {
   // op -> (partition dim, num of partitions)
   DataPartitionScheme partitionScheme;
   if (!computePartitionScheme(funcOp, partitionScheme)) {
-    if (numConsumerGroups > 1)
+    if (numConsumerGroups > 1) {
       llvm::errs() << "computePartitionScheme failed when requested\n";
-    return;
+      return false;
+    }
+    return true;
   }
 
   // Rewrite the rematerialized ops.
@@ -1371,6 +1375,7 @@ void partitionTasks(triton::FuncOp &funcOp, int numConsumerGroups) {
     LDBG("\n");
   });
   fixTaskId(funcOp);
+  return true;
 }
 
 #define GEN_PASS_DEF_TRITONGPUWSDATAPARTITION
@@ -1385,7 +1390,8 @@ public:
   void runOnFuncOp(triton::FuncOp funcOp) {
     if (numConsumerGroups == 0)
       return;
-    partitionTasks(funcOp, numConsumerGroups);
+    if (!partitionTasks(funcOp, numConsumerGroups))
+      signalPassFailure();
   }
 
   void runOnOperation() override {
