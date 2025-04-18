@@ -3,6 +3,7 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/IR/ImplicitLocOpBuilder.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Verifier.h"
@@ -1075,7 +1076,8 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
 
   DenseMap<AsyncTaskId, scf::IfOp> tasksToIfOp;
 
-  // Simple heuristics to merge tasks to one region.
+  // Simple heuristics to merge tasks to one region. Each region has a
+  // representing taskId as the key.
   DenseMap<AsyncTaskId, SmallVector<AsyncTaskId>> tasksToRegion;
   groupTasksToRegion(funcOp, opList, tasksToRegion);
   SmallVector<AsyncTaskId> keySorted;
@@ -1084,13 +1086,45 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
   }
   std::sort(keySorted.begin(), keySorted.end());
 
+  // For New Lowering.
+  // Instead of a new IfOp for each task region, we create one partitionRegion.
+  SmallVector<int32_t> partitionNumWarps;
+  for (AsyncTaskId keyId : keySorted) {
+    if (keyId == 0) {
+      continue; // the default region
+    }
+    partitionNumWarps.push_back(4); // Each region has 4 warps.
+  }
+  ArrayRef<Type> dummyTypes;
+  ImplicitLocOpBuilder impB(opList[0]->getLoc(), opList[0]);
+  impB.setInsertionPoint(returnOp);
+  auto wsOp = impB.create<WarpSpecializeOp>(dummyTypes, partitionNumWarps,
+                                            nTaskIds.size() - 1);
+  // Put producer wg in default. Check D71524884 for an example.
+
   // Clone all operations into the corresponding if blocks. If the operation
   // has multiple taskIds, it will be cloned for multiple if blocks.
   // If the original code has an IfOp, we should only clone its
   // body with the right asyncTaskId, instead of cloning the IfOp.
-  for (AsyncTaskId keyId : keySorted) {
-    auto &taskList = tasksToRegion[keyId];
-    // for (AsyncTaskId asyncTaskId : getNestedAsyncTaskIds(funcOp)) {
+  // For New Lowering: Handle producer WG.
+  {
+    AsyncTaskId asyncTaskId = keySorted[0];
+    OpBuilderWithAsyncTaskIds taskBuilder(context);
+    taskBuilder.setAsynTaskIdsFromArray({asyncTaskId});
+    Block *defaultBlock = impB.createBlock(&wsOp.getDefaultRegion());
+    taskBuilder.setInsertionPointToStart(defaultBlock);
+    IRMapping mapping;
+    for (Operation *op : opList) {
+      SpecializeOp(op, mapping, taskBuilder, asyncTaskId);
+    }
+    SmallVector<Value> opnds;
+    taskBuilder.create<WarpYieldOp>(loc, opnds);
+  }
+
+  unsigned idx = 1;
+  for (Region *region : wsOp.getPartitionRegions()) {
+    auto &taskList = tasksToRegion[keySorted[idx]];
+#if 0
     // Create IfOp for each asyncTaskId.
     Value cond = builder.create<arith::CmpIOp>(
         loc, arith::CmpIPredicate::eq, curAsyncTaskId,
@@ -1101,18 +1135,56 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
     auto ifOp = builder.create<scf::IfOp>(loc, cond);
     tasksToIfOp[keyId] = ifOp;
     setAsyncTaskIds(ifOp, taskList); //{asyncTaskId});
+#endif
 
     OpBuilderWithAsyncTaskIds taskBuilder(context);
     taskBuilder.setAsynTaskIdsFromArray(taskList); //{asyncTaskId});
 
+#if 0
     // Set insertion point before yieldOp.
     auto yieldOp = ifOp.thenYield();
     setAsyncTaskIds(yieldOp, taskList); //{asyncTaskId});
     taskBuilder.setInsertionPoint(yieldOp);
+#endif
+    LDBG("region idx " << idx << " " << nTaskIds.size());
+    ++idx;
+    Block *partitionBlock = impB.createBlock(region);
+    taskBuilder.setInsertionPointToStart(partitionBlock);
 
     IRMapping mapping;
     for (Operation *op : opList) {
       SpecializeOp(op, mapping, taskBuilder, taskList); // asyncTaskId);
+    }
+    taskBuilder.create<WarpReturnOp>(loc);
+  }
+  // The capture set is the same for every partition region, so now find the
+  // captures and thread them in to the regions.
+  SetVector<Value> captures;
+  getUsedValuesDefinedAbove(wsOp.getPartitionOpHolder(), captures);
+  for (Value capture : captures) {
+    // Rematerialize constants.
+    if (capture.getDefiningOp() &&
+        capture.getDefiningOp()->hasTrait<OpTrait::ConstantLike>()) {
+      for (Region *region : wsOp.getPartitionRegions()) {
+        impB.setInsertionPointToStart(&region->front());
+        Value copy = impB.clone(*capture.getDefiningOp())->getResult(0);
+        replaceAllUsesInRegionWith(capture, copy, *region);
+      }
+      continue;
+    }
+
+    if (isa<RankedTensorType>(capture.getType())) {
+      mlir::emitWarning(capture.getLoc(),
+                        "FIXME: capturing tensor values into warp "
+                        "partitions is not supported");
+      // return tasksToIfOp;
+    }
+    wsOp->insertOperands(wsOp.getNumOperands(), capture);
+    for (Region *region : wsOp.getPartitionRegions()) {
+      // Does this include default region?
+      BlockArgument arg =
+          region->addArgument(capture.getType(), capture.getLoc());
+      replaceAllUsesInRegionWith(capture, arg, *region);
     }
   }
 
