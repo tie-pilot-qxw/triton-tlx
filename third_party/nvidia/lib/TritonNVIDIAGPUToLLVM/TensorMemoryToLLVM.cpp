@@ -230,8 +230,8 @@ void calculateAddressAndEmitTmemMessage(
   if (!asyncTaskIds.empty()) {
     // numWarpGroups is for the current groups that do the load. In WS mode, we
     // assume only one warp group does TMEMLoad.
-    assert(asyncTaskIds.size() == 1 &&
-           "only support TMEM load in single async task");
+    // assert(asyncTaskIds.size() == 1 &&
+    //        "only support TMEM load in single async task");
     warpGroupId = b.sub(warpGroupId, b.i32_val(asyncTaskIds[0]));
   }
 

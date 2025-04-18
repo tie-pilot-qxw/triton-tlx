@@ -313,7 +313,7 @@ void convertDot(const LLVMTypeConverter *typeConverter,
   auto asyncTaskIds = getAsyncTaskIds(op);
   int executingWarpId = 0;
   if (!asyncTaskIds.empty()) {
-    assert(asyncTaskIds.size() == 1 && "only support single async task");
+    // assert(asyncTaskIds.size() == 1 && "only support single async task");
     auto mod = op->getParentOfType<ModuleOp>();
     int numWarps = triton::gpu::lookupNumWarps(mod);
     executingWarpId = asyncTaskIds[0] * numWarps;

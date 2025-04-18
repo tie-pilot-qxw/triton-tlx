@@ -1005,9 +1005,11 @@ static void isOpMMaTask(Operation *op, AsyncTaskId asyncTaskId,
 
 static void groupTasksToRegion(
     triton::FuncOp funcOp, SmallVector<Operation *> &opList,
-    DenseMap<AsyncTaskId, SmallVector<AsyncTaskId>> &tasksToRegion) {
+    DenseMap<AsyncTaskId, SmallVector<AsyncTaskId>> &tasksToRegion,
+    DenseMap<AsyncTaskId, unsigned> &numWarpsForTask) {
   // By default each taskId has its own group.
   DenseSet<AsyncTaskId> mmaTasks;
+  // Assume a single region for mma tasks, the key taskId is mmaTaskId.
   AsyncTaskId mmaTaskId;
   for (AsyncTaskId asyncTaskId : getNestedAsyncTaskIds(funcOp)) {
     // Mark a task as MMA only.
@@ -1030,10 +1032,13 @@ static void groupTasksToRegion(
   }
   // Merge all mmaTasks in one group.
   for (AsyncTaskId asyncTaskId : getNestedAsyncTaskIds(funcOp)) {
-    if (!mmaTasks.count(asyncTaskId))
+    if (!mmaTasks.count(asyncTaskId)) {
       tasksToRegion[asyncTaskId].push_back(asyncTaskId);
-    else
+      numWarpsForTask[asyncTaskId] = 4; // FIXME: hard-code to 4
+    } else {
       tasksToRegion[mmaTaskId].push_back(asyncTaskId);
+      numWarpsForTask[asyncTaskId] = 1;
+    }
   }
 }
 
@@ -1072,14 +1077,17 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
   Block *lastBlock = &funcOp.getBody().back();
   auto returnOp = llvm::cast<triton::ReturnOp>(lastBlock->getTerminator());
   builder.setInsertionPoint(returnOp);
+#if 0
   Value curAsyncTaskId = builder.create<ttng::GetAsyncTaskIdOp>(loc);
+#endif
 
   DenseMap<AsyncTaskId, scf::IfOp> tasksToIfOp;
 
   // Simple heuristics to merge tasks to one region. Each region has a
   // representing taskId as the key.
   DenseMap<AsyncTaskId, SmallVector<AsyncTaskId>> tasksToRegion;
-  groupTasksToRegion(funcOp, opList, tasksToRegion);
+  DenseMap<AsyncTaskId, unsigned> numWarpsForTask; // task to number of warps
+  groupTasksToRegion(funcOp, opList, tasksToRegion, numWarpsForTask);
   SmallVector<AsyncTaskId> keySorted;
   for (auto &kv : tasksToRegion) {
     keySorted.push_back(kv.first);
@@ -1093,7 +1101,7 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
     if (keyId == 0) {
       continue; // the default region
     }
-    partitionNumWarps.push_back(4); // Each region has 4 warps.
+    partitionNumWarps.push_back(numWarpsForTask[keyId]);
   }
   ArrayRef<Type> dummyTypes;
   ImplicitLocOpBuilder impB(opList[0]->getLoc(), opList[0]);
