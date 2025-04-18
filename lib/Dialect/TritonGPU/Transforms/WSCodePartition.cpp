@@ -1107,7 +1107,7 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
   ImplicitLocOpBuilder impB(opList[0]->getLoc(), opList[0]);
   impB.setInsertionPoint(returnOp);
   auto wsOp = impB.create<WarpSpecializeOp>(dummyTypes, partitionNumWarps,
-                                            nTaskIds.size() - 1);
+                                            keySorted.size() - 1);
   // Put producer wg in default. Check D71524884 for an example.
 
   // Clone all operations into the corresponding if blocks. If the operation
@@ -1116,14 +1116,14 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
   // body with the right asyncTaskId, instead of cloning the IfOp.
   // For New Lowering: Handle producer WG.
   {
-    AsyncTaskId asyncTaskId = keySorted[0];
     OpBuilderWithAsyncTaskIds taskBuilder(context);
-    taskBuilder.setAsynTaskIdsFromArray({asyncTaskId});
+    auto &taskList = tasksToRegion[keySorted[0]];
+    taskBuilder.setAsynTaskIdsFromArray(taskList);
     Block *defaultBlock = impB.createBlock(&wsOp.getDefaultRegion());
     taskBuilder.setInsertionPointToStart(defaultBlock);
     IRMapping mapping;
     for (Operation *op : opList) {
-      SpecializeOp(op, mapping, taskBuilder, asyncTaskId);
+      SpecializeOp(op, mapping, taskBuilder, taskList);
     }
     SmallVector<Value> opnds;
     taskBuilder.create<WarpYieldOp>(loc, opnds);
@@ -1154,7 +1154,6 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
     setAsyncTaskIds(yieldOp, taskList); //{asyncTaskId});
     taskBuilder.setInsertionPoint(yieldOp);
 #endif
-    LDBG("region idx " << idx << " " << nTaskIds.size());
     ++idx;
     Block *partitionBlock = impB.createBlock(region);
     taskBuilder.setInsertionPointToStart(partitionBlock);
