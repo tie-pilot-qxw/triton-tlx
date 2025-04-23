@@ -162,7 +162,7 @@ static void createChannel(Operation *producerOp, Operation *op,
                               producerTaskId);
       consumerTaskIds.erase(iter, consumerTaskIds.end());
 
-      const unsigned NUM_TMEM_BUFFERS = 2;
+      const unsigned NUM_TMEM_BUFFERS = 1; // change to 1 to fit into tmem
       // Add a channel from the single producer task to consumerTaskIds.
       if (consumerTaskIds.size() > 0) {
         if (auto dotOp = dyn_cast<nvidia_gpu::TCGen5MMAOp>(op)) {

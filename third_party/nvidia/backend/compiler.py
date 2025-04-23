@@ -19,9 +19,7 @@ from triton.runtime.errors import PTXASError
 
 def min_dot_size(target: GPUTarget):
 
-    def check_dot_compatibility(
-        lhs_type, rhs_type
-    ) -> Tuple[int, int, int]:  # [m, n, k]
+    def check_dot_compatibility(lhs_type, rhs_type) -> Tuple[int, int, int]:  # [m, n, k]
         lhs_bitwidth = lhs_type.scalar.primitive_bitwidth
         rhs_bitwidth = rhs_type.scalar.primitive_bitwidth
         assert lhs_bitwidth == rhs_bitwidth, "lhs and rhs bitwidth must be the same"
@@ -43,9 +41,7 @@ def _path_to_binary(binary: str):
 
     for path in paths:
         if os.path.exists(path) and os.path.isfile(path):
-            result = subprocess.check_output(
-                [path, "--version"], stderr=subprocess.STDOUT
-            )
+            result = subprocess.check_output([path, "--version"], stderr=subprocess.STDOUT)
             if result is not None:
                 version = re.search(
                     r".*release (\d+\.\d+).*",
@@ -88,9 +84,7 @@ def ptx_get_version(cuda_version) -> int:
         return 70 + minor
     if major == 10:
         return 63 + minor
-    raise RuntimeError(
-        "Triton only support CUDA 10.0 or higher, but got CUDA version: " + cuda_version
-    )
+    raise RuntimeError("Triton only support CUDA 10.0 or higher, but got CUDA version: " + cuda_version)
 
 
 def get_ptx_version_from_options(options, arch: int):
@@ -158,19 +152,13 @@ class CUDAOptions:
         default_libdir = Path(__file__).parent / "lib"
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
         if not extern_libs.get("libdevice", None):
-            extern_libs["libdevice"] = os.getenv(
-                "TRITON_LIBDEVICE_PATH", str(default_libdir / "libdevice.10.bc")
-            )
+            extern_libs["libdevice"] = os.getenv("TRITON_LIBDEVICE_PATH", str(default_libdir / "libdevice.10.bc"))
         object.__setattr__(self, "extern_libs", tuple(extern_libs.items()))
-        assert (
-            self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0
-        ), "num_warps must be a power of 2"
+        assert (self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0), "num_warps must be a power of 2"
 
     def hash(self):
         hash_dict = dict(self.__dict__)
-        hash_dict["extern_libs"] = tuple(
-            (k, file_hash(v)) for k, v in sorted(hash_dict["extern_libs"])
-        )
+        hash_dict["extern_libs"] = tuple((k, file_hash(v)) for k, v in sorted(hash_dict["extern_libs"]))
         key = "_".join([f"{name}-{val}" for name, val in sorted(hash_dict.items())])
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
@@ -194,14 +182,7 @@ class CUDABackend(BaseBackend):
 
     def parse_options(self, opts) -> Any:
         args = {"arch": os.getenv("TRITON_OVERRIDE_ARCH", f"sm{self.target.arch}")}
-        args.update(
-            {
-                k: opts[k]
-                for k in CUDAOptions.__dataclass_fields__.keys()
-                if k in opts
-                if opts[k] is not None
-            }
-        )
+        args.update({k: opts[k] for k in CUDAOptions.__dataclass_fields__.keys() if k in opts if opts[k] is not None})
         capability = int(self._parse_arch(args["arch"]))
 
         if "supported_fp8_dtypes" not in args:
@@ -212,7 +193,7 @@ class CUDABackend(BaseBackend):
 
         if "deprecated_fp8_dtypes" not in args:
             if capability >= 90:
-                args["deprecated_fp8_dtypes"] = ("fp8e4b15",)
+                args["deprecated_fp8_dtypes"] = ("fp8e4b15", )
 
         if "enable_fp_fusion" not in args:
             args["enable_fp_fusion"] = os.getenv("TRITON_DEFAULT_FP_FUSION", "1") == "1"
@@ -236,12 +217,10 @@ class CUDABackend(BaseBackend):
 
         capability = int(self._parse_arch(options.arch))
         codegen_fns = {
-            "convert_custom_types": (
-                cuda.convert_custom_float8_sm80
-                if capability >= 80
-                else cuda.convert_custom_float8_sm70
-            ),
-            "min_dot_size": min_dot_size(self.target),
+            "convert_custom_types":
+            (cuda.convert_custom_float8_sm80 if capability >= 80 else cuda.convert_custom_float8_sm70),
+            "min_dot_size":
+            min_dot_size(self.target),
         }
         return codegen_fns
 
@@ -272,9 +251,7 @@ class CUDABackend(BaseBackend):
     def make_ttgir(mod, metadata, opt, capability):
         # Set maxnreg on all kernels, if it was provided.
         if opt.maxnreg is not None:
-            mod.set_attr(
-                "ttg.maxnreg", ir.builder(mod.context).get_int32_attr(opt.maxnreg)
-            )
+            mod.set_attr("ttg.maxnreg", ir.builder(mod.context).get_int32_attr(opt.maxnreg))
 
         cluster_info = nvidia.ClusterInfo()
         if opt.cluster_dims is not None:
@@ -283,9 +260,7 @@ class CUDABackend(BaseBackend):
             cluster_info.clusterDimZ = opt.cluster_dims[2]
         pm = ir.pass_manager(mod.context)
         dump_enabled = pm.enable_debug()
-        passes.ttir.add_convert_to_ttgpuir(
-            pm, f"cuda:{capability}", opt.num_warps, 32, opt.num_ctas
-        )
+        passes.ttir.add_convert_to_ttgpuir(pm, f"cuda:{capability}", opt.num_warps, 32, opt.num_ctas)
         # optimize TTGIR
         passes.ttgpuir.add_coalesce(pm)
         if capability // 10 >= 8:
@@ -326,6 +301,7 @@ class CUDABackend(BaseBackend):
             passes.ttgpuir.add_optimize_accumulator_init(pm)
             passes.ttgpuir.add_hoist_tmem_alloc(pm)
             if opt.num_consumer_groups > 0:
+                nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
                 passes.ttgpuir.add_ws_task_partition(pm, opt.num_consumer_groups)
                 passes.ttgpuir.add_taskid_propagate(pm, opt.num_consumer_groups)
                 passes.ttgpuir.add_ws_data_partition(pm, opt.num_consumer_groups)
@@ -340,7 +316,8 @@ class CUDABackend(BaseBackend):
                 passes.ttgpuir.add_warp_specialize(pm, opt.num_stages)
             passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled)
             passes.ttgpuir.add_combine_tensor_select_and_if(pm)
-            nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
+            if opt.num_consumer_groups <= 0:
+                nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
             passes.ttgpuir.add_ws_lowering(pm, opt.num_consumer_groups)
             passes.common.add_canonicalizer(pm)
         else:
@@ -404,8 +381,7 @@ class CUDABackend(BaseBackend):
         context = llvm.context()
         if os.environ.get("TRITON_ENABLE_ASAN", "0") == "1":
             raise RuntimeError(
-                "Address Sanitizer Error: Address sanitizer is currently only supported on the AMD backend"
-            )
+                "Address Sanitizer Error: Address sanitizer is currently only supported on the AMD backend")
         llvm_mod = llvm.to_module(mod, context)
         proc = sm_arch_from_capability(capability)
         features = get_features(options, self.target.arch)
@@ -427,12 +403,8 @@ class CUDABackend(BaseBackend):
             metadata["num_warps"] = total_num_warps
         metadata["shared"] = src.get_int_attr("ttg.shared")
         metadata["tmem_size"] = src.get_int_attr("ttg.tensor_memory_size")
-        metadata["global_scratch_size"] = src.get_int_attr(
-            "ttg.global_scratch_memory_size"
-        )
-        metadata["global_scratch_align"] = src.get_int_attr(
-            "ttg.global_scratch_memory_alignment"
-        )
+        metadata["global_scratch_size"] = src.get_int_attr("ttg.global_scratch_memory_size")
+        metadata["global_scratch_align"] = src.get_int_attr("ttg.global_scratch_memory_alignment")
         ret = str(llvm_mod)
         del llvm_mod
         del context
@@ -444,21 +416,15 @@ class CUDABackend(BaseBackend):
         triple = "nvptx64-nvidia-cuda"
         proc = sm_arch_from_capability(capability)
         features = get_features(opt, self.target.arch)
-        ret = llvm.translate_to_asm(
-            src, triple, proc, features, [], opt.enable_fp_fusion, False
-        )
+        ret = llvm.translate_to_asm(src, triple, proc, features, [], opt.enable_fp_fusion, False)
         # Find kernel names (there should only be one)
         names = re.findall(r".visible .entry ([a-zA-Z_][a-zA-Z0-9_]*)", ret)
         assert len(names) == 1
         metadata["name"] = names[0]
         # post-process
         ptx_version = f"{ptx_version//10}.{ptx_version%10}"
-        ret = re.sub(
-            r"\.version \d+\.\d+", f".version {ptx_version}", ret, flags=re.MULTILINE
-        )
-        ret = re.sub(
-            r"\.target sm_\d+", f".target sm_{capability}", ret, flags=re.MULTILINE
-        )
+        ret = re.sub(r"\.version \d+\.\d+", f".version {ptx_version}", ret, flags=re.MULTILINE)
+        ret = re.sub(r"\.target sm_\d+", f".target sm_{capability}", ret, flags=re.MULTILINE)
         # Remove the debug flag that prevents ptxas from optimizing the code
         ret = re.sub(r",\s*debug|debug,\s*", "", ret)
         if os.environ.get("NVPTX_ENABLE_DUMP", "0") == "1":
@@ -468,27 +434,17 @@ class CUDABackend(BaseBackend):
 
     def make_cubin(self, src, metadata, opt, capability):
         ptxas, _ = get_ptxas()
-        with tempfile.NamedTemporaryFile(
-            delete=False, mode="w", suffix=".ptx"
-        ) as fsrc, tempfile.NamedTemporaryFile(
-            delete=False, mode="r", suffix=".log"
-        ) as flog:
+        with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".ptx") as fsrc, tempfile.NamedTemporaryFile(
+                delete=False, mode="r", suffix=".log") as flog:
             fsrc.write(src)
             fsrc.flush()
             fbin = fsrc.name + ".o"
 
-            line_info = (
-                ["-lineinfo", "-suppress-debug-info"]
-                if os.environ.get("TRITON_DISABLE_LINE_INFO", "0") == "1"
-                else ["-lineinfo"]
-            )
+            line_info = (["-lineinfo", "-suppress-debug-info"]
+                         if os.environ.get("TRITON_DISABLE_LINE_INFO", "0") == "1" else ["-lineinfo"])
             fmad = [] if opt.enable_fp_fusion else ["--fmad=false"]
             arch = sm_arch_from_capability(capability)
-            opt_level = (
-                ["--opt-level", "0"]
-                if os.environ.get("DISABLE_PTXAS_OPT", "0") == "1"
-                else []
-            )
+            opt_level = (["--opt-level", "0"] if os.environ.get("DISABLE_PTXAS_OPT", "0") == "1" else [])
             ptxas_cmd = [
                 ptxas,
                 *line_info,
@@ -519,11 +475,9 @@ class CUDABackend(BaseBackend):
                 else:
                     error = f"`ptxas` failed with error code {e.returncode}"
 
-                raise PTXASError(
-                    f"{error}\n"
-                    f"`ptxas` stderr:\n{log}\n"
-                    f'Repro command: {" ".join(ptxas_cmd)}\n'
-                )
+                raise PTXASError(f"{error}\n"
+                                 f"`ptxas` stderr:\n{log}\n"
+                                 f'Repro command: {" ".join(ptxas_cmd)}\n')
 
             with open(fbin, "rb") as f:
                 cubin = f.read()
@@ -534,18 +488,10 @@ class CUDABackend(BaseBackend):
     def add_stages(self, stages, options):
         capability = self._parse_arch(options.arch)
         stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
-        stages["ttgir"] = lambda src, metadata: self.make_ttgir(
-            src, metadata, options, capability
-        )
-        stages["llir"] = lambda src, metadata: self.make_llir(
-            src, metadata, options, capability
-        )
-        stages["ptx"] = lambda src, metadata: self.make_ptx(
-            src, metadata, options, self.target.arch
-        )
-        stages["cubin"] = lambda src, metadata: self.make_cubin(
-            src, metadata, options, self.target.arch
-        )
+        stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options, capability)
+        stages["llir"] = lambda src, metadata: self.make_llir(src, metadata, options, capability)
+        stages["ptx"] = lambda src, metadata: self.make_ptx(src, metadata, options, self.target.arch)
+        stages["cubin"] = lambda src, metadata: self.make_cubin(src, metadata, options, self.target.arch)
 
     @functools.lru_cache()
     def hash(self):
