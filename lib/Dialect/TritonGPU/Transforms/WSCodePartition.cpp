@@ -634,8 +634,11 @@ void createToken(
 
       // For channels associated with acc of gen5, consumerOp is not the gen5,
       // it is usually tmem_load.
+      bool disableInlineGen5Barrier =
+          triton::tools::getBoolEnv("DISABLE_INLINE_GEN5_BARRIER");
       bool useGen5Barrier = isa<nvidia_gpu::TCGen5MMAOp>(consumerOp) &&
-                            producerOp->getBlock() == consumerOp->getBlock();
+                            producerOp->getBlock() == consumerOp->getBlock() &&
+                            !disableInlineGen5Barrier;
       LLVM_DEBUG({
         LDBG("-- creatToken: useGen5Barrier = " << useGen5Barrier);
         consumerOp->dump();
@@ -826,6 +829,14 @@ DenseMap<Channel *, Value> createBuffer(
   return bufferMap;
 }
 
+ttng::WaitBarrierOp waitGen5Done(OpBuilderWithAsyncTaskIds &builder,
+                                 nvidia_gpu::TCGen5MMAOp mmaOp,
+                                 Value barrierAlloc, Value bufferIdx,
+                                 Value inPhase, unsigned numBuffers,
+                                 DenseSet<Operation *> &opsWithChannels,
+                                 SmallVector<Operation *> &opsWithBufferReuse,
+                                 mlir::DominanceInfo &dom);
+
 // Make TCGen5MMAOp fully asynchronous by de-synchronizing it. This leverages
 // its inline barrier to synchronize with both the producer (TMA load) and the
 // consumer (TMEM load). Return the WaitBarrierOp inserted before the consumer
@@ -835,15 +846,6 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
     Value barrierAlloc, Value bufferIdx, Value inPhase, unsigned numBuffers,
     Operation *headProducer, DenseSet<Operation *> &opsWithChannels,
     SmallVector<Operation *> &opsWithBufferReuse, mlir::DominanceInfo &dom) {
-  // Attach the barrier as an operand of the mma op.
-  builder.setInsertionPoint(mmaOp);
-  builder.setAsyncTaskIdsFromOp(mmaOp);
-  auto consumerBarrier =
-      getBarrierForPipelineStage(builder, barrierAlloc, bufferIdx);
-  assert(mmaOp.getBarriers().empty() && "mmaOp should not have barriers");
-  auto pred = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
-      mmaOp->getLoc(), true, 1);
-  mmaOp.addCompletionBarrier(consumerBarrier, pred);
 
   // Create a wait_barrier before the producer.
   builder.setInsertionPoint(headProducer);
@@ -862,9 +864,30 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
                                                       phase);
 
   LLVM_DEBUG({
-    LDBG("desync: create wait_barrier for producer ");
+    LDBG("desync: create wait_barrier for consumer ");
     producerBarrier.dump();
   });
+  return waitGen5Done(builder, mmaOp, barrierAlloc, bufferIdx, inPhase,
+                      numBuffers, opsWithChannels, opsWithBufferReuse, dom);
+}
+
+ttng::WaitBarrierOp waitGen5Done(OpBuilderWithAsyncTaskIds &builder,
+                                 nvidia_gpu::TCGen5MMAOp mmaOp,
+                                 Value barrierAlloc, Value bufferIdx,
+                                 Value inPhase, unsigned numBuffers,
+                                 DenseSet<Operation *> &opsWithChannels,
+                                 SmallVector<Operation *> &opsWithBufferReuse,
+                                 mlir::DominanceInfo &dom) {
+  // Attach the barrier as an operand of the mma op.
+  builder.setInsertionPoint(mmaOp);
+  builder.setAsyncTaskIdsFromOp(mmaOp);
+  auto consumerBarrier =
+      getBarrierForPipelineStage(builder, barrierAlloc, bufferIdx);
+  assert(mmaOp.getBarriers().empty() && "mmaOp should not have barriers");
+  auto pred = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
+      mmaOp->getLoc(), true, 1);
+  mmaOp.addCompletionBarrier(consumerBarrier, pred);
+
   // Create a wait_barrier before the tmem load.
   SetVector<std::pair<Operation *, unsigned>> users;
   getTransitiveUsers(mmaOp.getD(), users);
@@ -883,6 +906,7 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
     }
     builder.setInsertionPoint(user);
     builder.setAsyncTaskIdsFromOp(mmaOp);
+    Value phase;
     // If user and mmaOp are in the same block, we can use the same barrier.
     if (user->getBlock() != mmaOp->getBlock()) {
       // Compute the barrier from the last consumer instance
@@ -1138,19 +1162,40 @@ void insertAsyncComm(
         SmallVector<AsyncTaskId> asyncTasksMma = getAsyncTaskIds(mmaOp);
         assert(asyncTasksMma.size() == 1 && asyncTasksMma[0] == consumerTaskId);
       }
-      if (mmaOp && commChannel.consumerBarriers.count(consumerTaskId)) {
-        LLVM_DEBUG({
-          LDBG("unique actual consumer is gen5 mma ");
-          mmaOp->dump();
-        });
-        auto iter = commChannel.consumerBarriers.find(consumerTaskId);
-        Value consumerBarrier = iter->second;
-        // Use consumerBarrier as gen5 inline barrier.
-        auto tmemWaitBarrier =
-            desyncTCGen5MMAOp(builder, mmaOp, consumerBarrier, bufferIdx, phase,
-                              masterChannel->numBuffers, headProducer,
-                              opsWithChannels, opsWithBufferReuse, dom);
-        tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
+      // If the actual consumer is gen5, we need to make sure gen5 is done by
+      // creating a waitBarrier on gen5 barrier. If this commChannel has a
+      // consumer barrier, we will make sure gen5 uses the consumer barrier,
+      // together with producerAcquire, a waitBarrier on the consumer barrier is
+      // inserted at transitive user of gen5's D operand, no consumerRelease is
+      // necessary. If this commChannel doesn't have a consumer barrier, we need
+      // to create a barrier for the gen5, and producerAcuire/consumerRelease
+      // will be inserted on the associated token. A waitBarrier on the consumer
+      // barrier is inserted at transitive user of gen5's D operand.
+      if (mmaOp) {
+        if (commChannel.consumerBarriers.count(consumerTaskId)) {
+          LLVM_DEBUG({
+            LDBG("unique actual consumer is gen5 mma ");
+            mmaOp->dump();
+          });
+          auto iter = commChannel.consumerBarriers.find(consumerTaskId);
+          Value consumerBarrier = iter->second;
+          // Use consumerBarrier as gen5 inline barrier.
+          auto tmemWaitBarrier =
+              desyncTCGen5MMAOp(builder, mmaOp, consumerBarrier, bufferIdx,
+                                phase, masterChannel->numBuffers, headProducer,
+                                opsWithChannels, opsWithBufferReuse, dom);
+          tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
+        } else if (!tmemWaitBarriers.count(mmaOp)) {
+          // Create a barrier for the gen5, A waitBarrier on the consumer
+          // barrier is inserted at transitive user of gen5's D operand.
+          auto barrierAlloc =
+              createBarrierAlloc(funcOp, masterChannel->numBuffers);
+          auto tmemWaitBarrier =
+              waitGen5Done(builder, mmaOp, barrierAlloc, bufferIdx, phase,
+                           masterChannel->numBuffers, opsWithChannels,
+                           opsWithBufferReuse, dom);
+          tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
+        }
       }
     }
 
