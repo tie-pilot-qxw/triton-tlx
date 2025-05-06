@@ -1282,8 +1282,20 @@ void foldLocalLoads(triton::FuncOp funcOp) {
     }
   });
   OpBuilderWithAsyncTaskIds builder(funcOp.getContext());
-  for (auto kv : opsToReplace)
+  for (auto kv : opsToReplace) {
     replaceUsesAndPropagateType(builder, kv.getFirst(), kv.getSecond());
+    auto localAlloc = cast<ttg::LocalAllocOp>(kv.getFirst());
+    auto localLoad =
+        cast<ttg::LocalLoadOp>(localAlloc.getSrc().getDefiningOp());
+    if (localAlloc.getResult().use_empty()) {
+      LDBG("-- erase localAlloc");
+      localAlloc.erase();
+    }
+    if (localLoad.getResult().use_empty()) {
+      LDBG("-- erase localLoad");
+      localLoad.erase();
+    }
+  }
 }
 
 class TritonGPUWSCodePartitionPass
