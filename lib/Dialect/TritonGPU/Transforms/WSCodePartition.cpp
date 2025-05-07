@@ -212,6 +212,7 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
       auto producerOp = op;
       if (auto dotOp = dyn_cast<nvidia_gpu::TCGen5MMAOp>(op)) {
         auto accumulator = dotOp.getD();
+        // Here producerOp is tmem_alloc.
         producerOp = accumulator.getDefiningOp();
         createChannel(producerOp, op, dom, channels, false, producerNumBuffers);
         // We may need to create a TMEM channel for A operand.
@@ -596,6 +597,22 @@ static Value createBarrierAlloc(triton::FuncOp funcOp, unsigned distance) {
   return barrierAlloc;
 }
 
+static Operation *ProducerIsGen5(Operation *producerOp) {
+  if (isa<nvidia_gpu::TCGen5MMAOp>(producerOp))
+    return producerOp;
+  Operation *allocOp = producerOp;
+  if (auto tmSt = dyn_cast<ttng::TMEMStoreOp>(producerOp)) {
+    allocOp = tmSt.getDst().getDefiningOp();
+  }
+  for (auto user : allocOp->getUsers()) {
+    if (auto mmaOp = dyn_cast<nvidia_gpu::TCGen5MMAOp>(user)) {
+      if (mmaOp.getD() == allocOp->getResult(0))
+        return user;
+    }
+  }
+  return nullptr;
+}
+
 // channelsGroupedByConsumers: channels are grouped together.
 // Go through each group, check the first channel in the group, create a token
 // for each consumer taskId. Return a map that maps each channel + consumer
@@ -622,10 +639,17 @@ void createToken(
     auto producerOp = it->second.front()->getSrcOp();
     auto dstOp = it->second.front()->getDstOp();
 
+    // Also create producerBarrier for TMEM channel where producer is the D
+    // operand of gen5.
     if (isa<tt::DescriptorLoadOp>(producerOp)) {
       commChannel.producerBarrier =
           createBarrierAlloc(funcOp, channel->numBuffers);
     }
+    // Pattern matching for tmem_store --> getD --> tmem_load (gen5 is the
+    // actual producer) or gen5 --> tmem_load
+    if (ProducerIsGen5(producerOp))
+      commChannel.producerBarrier =
+          createBarrierAlloc(funcOp, channel->numBuffers);
 
     for (auto consumerAsyncTaskId : channel->relation.second) {
       // It is possible that this channel has two consumer taskIds.
@@ -640,7 +664,9 @@ void createToken(
                             producerOp->getBlock() == consumerOp->getBlock() &&
                             !disableInlineGen5Barrier;
       LLVM_DEBUG({
-        LDBG("-- creatToken: useGen5Barrier = " << useGen5Barrier);
+        LDBG("-- createToken: useGen5Barrier = " << useGen5Barrier);
+        producerOp->dump();
+        dstOp->dump();
         consumerOp->dump();
       });
       if (useGen5Barrier) {
@@ -648,7 +674,7 @@ void createToken(
         // If the gen5 barrier for this mmaOp is already used for another
         // channel, do not use it for this channel.
         if (gen5Barriers.count(mmaOp) && gen5Barriers[mmaOp] != channel) {
-          useGen5Barrier = false;
+          // useGen5Barrier = false;
           LDBG("-- mmaOp already has a channel associated");
         }
       }
@@ -841,21 +867,35 @@ ttng::WaitBarrierOp waitGen5Done(OpBuilderWithAsyncTaskIds &builder,
 // its inline barrier to synchronize with both the producer (TMA load) and the
 // consumer (TMEM load). Return the WaitBarrierOp inserted before the consumer
 // (TMEM load).
-ttng::WaitBarrierOp desyncTCGen5MMAOp(
-    OpBuilderWithAsyncTaskIds &builder, nvidia_gpu::TCGen5MMAOp mmaOp,
-    Value barrierAlloc, Value bufferIdx, Value inPhase, unsigned numBuffers,
-    Operation *headProducer, DenseSet<Operation *> &opsWithChannels,
-    SmallVector<Operation *> &opsWithBufferReuse, mlir::DominanceInfo &dom) {
+void desyncTCGen5MMAOp(OpBuilderWithAsyncTaskIds &builder,
+                       nvidia_gpu::TCGen5MMAOp mmaOp, Value barrierAlloc,
+                       Value bufferIdx, Value inPhase, unsigned numBuffers,
+                       Operation *producerOrConsumer,
+                       DenseSet<Operation *> &opsWithChannels,
+                       SmallVector<Operation *> &opsWithBufferReuse,
+                       mlir::DominanceInfo &dom) {
 
-  // Create a wait_barrier before the producer.
-  builder.setInsertionPoint(headProducer);
-  builder.setAsyncTaskIdsFromOp(headProducer);
+  // Attach the barrier as an operand of the mma op.
+  builder.setInsertionPoint(mmaOp);
+  builder.setAsyncTaskIdsFromOp(mmaOp);
+  auto consumerBarrier =
+      getBarrierForPipelineStage(builder, barrierAlloc, bufferIdx);
+  // assert(mmaOp.getBarriers().empty() && "mmaOp should not have barriers");
+  auto pred = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
+      mmaOp->getLoc(), true, 1);
+  // We can add multiple completion barriers.
+  mmaOp.addCompletionBarrier(consumerBarrier, pred);
+
+  // Create a wait_barrier before the producer to serve as ProducerAcquire.
+  // Or a wait_barrier before the consumer to serve as ConsumerWait.
+  builder.setInsertionPoint(producerOrConsumer);
+  builder.setAsyncTaskIdsFromOp(producerOrConsumer);
   auto producerBarrier =
       getBarrierForPipelineStage(builder, barrierAlloc, bufferIdx);
   // curPhase = curPhase xor True for emptyBarrier.
-  auto loc = headProducer->getLoc();
+  auto loc = producerOrConsumer->getLoc();
   Value _1_1b = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 1);
-  // Creating phase for headProducer.
+  // Creating phase for producerOrConsumer.
   Value phase =
       builder.createWithAsyncTaskIds<mlir::arith::XOrIOp>(loc, inPhase, _1_1b);
   phase = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
@@ -867,8 +907,10 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
     LDBG("desync: create wait_barrier for consumer ");
     producerBarrier.dump();
   });
+#if 0
   return waitGen5Done(builder, mmaOp, barrierAlloc, bufferIdx, inPhase,
                       numBuffers, opsWithChannels, opsWithBufferReuse, dom);
+#endif
 }
 
 ttng::WaitBarrierOp waitGen5Done(OpBuilderWithAsyncTaskIds &builder,
@@ -886,6 +928,7 @@ ttng::WaitBarrierOp waitGen5Done(OpBuilderWithAsyncTaskIds &builder,
   assert(mmaOp.getBarriers().empty() && "mmaOp should not have barriers");
   auto pred = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
       mmaOp->getLoc(), true, 1);
+  // We can add multiple completion barriers.
   mmaOp.addCompletionBarrier(consumerBarrier, pred);
 
   // Create a wait_barrier before the tmem load.
@@ -1154,6 +1197,19 @@ void insertAsyncComm(
 
     builder.setAsynTaskIdsFromArray(masterChannel->relation.first);
 
+    if (commChannel.producerBarrier) {
+      // Check to see if gen5 is the producer.
+      Operation *mmaOp = ProducerIsGen5(headProducer);
+      if (mmaOp) {
+        // Add one barrier to gen5, also insert WaitBarrier at headConsumer
+        // to wait till gen5 is done so we can start using the D operand.
+        LLVM_DEBUG({ LDBG("channel has gen5 mma as producer "); });
+        desyncTCGen5MMAOp(builder, cast<nvidia_gpu::TCGen5MMAOp>(mmaOp),
+                          *commChannel.producerBarrier, bufferIdx, phase,
+                          masterChannel->numBuffers, headConsumer,
+                          opsWithChannels, opsWithBufferReuse, dom);
+      }
+    }
     // Channel can have multiple consumers.
     for (auto &consumerTaskId : masterChannel->relation.second) {
       // Desynchronize TCGen5MMAOp. Set up consumer release and producer
@@ -1168,27 +1224,29 @@ void insertAsyncComm(
       // If the actual consumer is gen5, we need to make sure gen5 is done by
       // creating a waitBarrier on gen5 barrier. If this commChannel has a
       // consumer barrier, we will make sure gen5 uses the consumer barrier,
-      // together with producerAcquire, a waitBarrier on the consumer barrier is
-      // inserted at transitive user of gen5's D operand, no consumerRelease is
-      // necessary. If this commChannel doesn't have a consumer barrier, we need
-      // to create a barrier for the gen5, and producerAcuire/consumerRelease
-      // will be inserted on the associated token. A waitBarrier on the consumer
-      // barrier is inserted at transitive user of gen5's D operand.
+      // together with producerAcquire, a waitBarrier on the consumer barrier
+      // is inserted at transitive user of gen5's D operand, no
+      // consumerRelease is necessary. If this commChannel doesn't have a
+      // consumer barrier, we need to create a barrier for the gen5, and
+      // producerAcuire/consumerRelease will be inserted on the associated
+      // token. A waitBarrier on the consumer barrier is inserted at
+      // transitive user of gen5's D operand.
       if (mmaOp) {
         if (commChannel.consumerBarriers.count(consumerTaskId)) {
           LLVM_DEBUG({
-            LDBG("unique actual consumer is gen5 mma ");
+            LDBG("channel with consumerTaskId "
+                 << consumerTaskId << " has gen5 mma as consumer ");
             mmaOp->dump();
           });
           auto iter = commChannel.consumerBarriers.find(consumerTaskId);
           Value consumerBarrier = iter->second;
           // Use consumerBarrier as gen5 inline barrier.
-          auto tmemWaitBarrier =
-              desyncTCGen5MMAOp(builder, mmaOp, consumerBarrier, bufferIdx,
-                                phase, masterChannel->numBuffers, headProducer,
-                                opsWithChannels, opsWithBufferReuse, dom);
-          tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
-        } else if (!tmemWaitBarriers.count(mmaOp)) {
+          // auto tmemWaitBarrier =
+          desyncTCGen5MMAOp(builder, mmaOp, consumerBarrier, bufferIdx, phase,
+                            masterChannel->numBuffers, headProducer,
+                            opsWithChannels, opsWithBufferReuse, dom);
+          // tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
+        } /*else if (!tmemWaitBarriers.count(mmaOp)) {
           LLVM_DEBUG({
             LDBG("unique actual consumer is gen5 mma no consumer Barrier");
             mmaOp->dump();
@@ -1202,7 +1260,7 @@ void insertAsyncComm(
                            masterChannel->numBuffers, opsWithChannels,
                            opsWithBufferReuse, dom);
           tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
-        }
+        } */
       }
     }
 
@@ -1215,10 +1273,14 @@ void insertAsyncComm(
             headProducer->getLoc(), token.second, bufferIdx, phase);
       }
 
-      // Insert ProducerCommitOp if producer is not TMA. For TMA, TMA lowering
-      // will handle the ProducerCommit.
       if (!commChannel.producerBarrier) {
+        // When there is no producer barrier, we will emit both ProducerCommit
+        // and ConsumerWait. Otherwise, there is no explicit ProducerCommit,
+        // and ConsumerWait will be on the producerBarrier via WaitBarrierOp
+        // which is handled else where.
         Operation *producerCommitPoint;
+        producerCommitPoint = getSameLevelOp(headConsumer, tailProducer);
+#if 0
         if (masterChannel->channelKind == DataChannelKind::TMEM) {
           ttng::TmemDataChannel *tmemChannel =
               static_cast<ttng::TmemDataChannel *>(masterChannel);
@@ -1228,6 +1290,7 @@ void insertAsyncComm(
         } else {
           producerCommitPoint = getSameLevelOp(headConsumer, tailProducer);
         }
+#endif
         builder.setInsertionPointAfter(producerCommitPoint);
         builder.createWithAsyncTaskIds<ttng::ProducerCommitOp>(
             tailProducer->getLoc(), token.second, bufferIdx);
@@ -1329,16 +1392,17 @@ public:
     groupChannels(channels, channelsGroupedByProducers,
                   channelsGroupedByConsumers, orderedChannels);
 
-    // Step 3: reorder producer ops and the backward slices of the producer ops.
+    // Step 3: reorder producer ops and the backward slices of the producer
+    // ops.
     reorderProducerOps(channels);
 
-    // Step 4: find top-level ops that contain a channel, also create new ForOps
-    // by adding phase and bufferIdx to the original ForOps, erase the original
-    // ForOps.
+    // Step 4: find top-level ops that contain a channel, also create new
+    // ForOps by adding phase and bufferIdx to the original ForOps, erase the
+    // original ForOps.
     SmallVector<Operation *> asyncTaskTopOps =
         getTaskTopRegion(funcOp, channels);
-    // Update mapToRepresenting that maps a channel to the representing channel
-    // in the sharing group.
+    // Update mapToRepresenting that maps a channel to the representing
+    // channel in the sharing group.
     DenseMap<Channel *, Channel *> mapToRepresenting;
     SmallVector<Operation *> opsWithBufferReuse;
     reuseBuffers(asyncTaskTopOps, channels, mapToRepresenting,
