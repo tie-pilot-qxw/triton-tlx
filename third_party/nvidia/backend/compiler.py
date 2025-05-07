@@ -288,6 +288,7 @@ class CUDABackend(BaseBackend):
             # passes.ttgpuir.add_hoist_tmem_alloc(pm)
             nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
             if opt.num_consumer_groups > 0:
+                nvidia.passes.ttnvgpuir.add_remove_tmem_tokens(pm)
                 passes.ttgpuir.add_ws_task_partition(pm, opt.num_consumer_groups)
                 passes.ttgpuir.add_taskid_propagate(pm, opt.num_consumer_groups)
                 passes.ttgpuir.add_ws_data_partition(pm, opt.num_consumer_groups)
