@@ -758,8 +758,14 @@ static ttng::TMEMAllocOp createTMemAlloc(OpBuilder &builder,
   Type accMemDescType = triton::gpu::MemDescType::get(
       shape, oldRetType.getElementType(), oldRetType.getEncoding(),
       oldRetType.getMemorySpace(), /*mutableMemory=*/true);
+#if 0
+  auto tokType = builder.getType<AsyncTokenType>();
+  return builder.create<ttng::TMEMAllocOp>(oldTMemAllocOp.getLoc(),
+                                           accMemDescType, tokType, nullptr);
+#else
   return builder.create<ttng::TMEMAllocOp>(oldTMemAllocOp.getLoc(),
                                            accMemDescType, nullptr);
+#endif
 }
 
 // Create a buffer array for each producer op, if the producer is in a ForOp,
