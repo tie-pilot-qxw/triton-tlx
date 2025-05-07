@@ -285,7 +285,7 @@ class CUDABackend(BaseBackend):
             passes.common.add_canonicalizer(pm)
             passes.ttir.add_triton_licm(pm)
             passes.ttgpuir.add_optimize_accumulator_init(pm)
-            passes.ttgpuir.add_hoist_tmem_alloc(pm)
+            # passes.ttgpuir.add_hoist_tmem_alloc(pm)
             nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
             if opt.num_consumer_groups > 0:
                 passes.ttgpuir.add_ws_task_partition(pm, opt.num_consumer_groups)
