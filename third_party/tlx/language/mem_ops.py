@@ -1,0 +1,318 @@
+import triton.language.core as tl
+from triton.language.semantic import (
+    _convert_elem_to_ir_value,
+    _convert_to_ir_values,
+    _str_to_load_cache_modifier,
+    _str_to_eviction_policy,
+    _prepare_legacy_load,
+)
+
+from . import types as tlx
+from .utility import cuda_parse_arch
+from .mma_ops import require_nv_mma_shared_layout
+from typing import Optional, Tuple
+
+
+def _assert_blackwell_for_tmem(arch):
+    capability = int(cuda_parse_arch(arch))
+    assert capability >= 100, "tmem is only available on Blackwell"
+
+
+def _create_tmem_compatible_tensor_layout_encoding(
+    _builder,
+    tensor: tlx.buffered_tensor,
+):
+    module_num_warps = _builder.options.num_warps
+    assert module_num_warps > 0, "tmem load requires num_warps > 0"
+    num_ctas = _builder.options.num_ctas
+    assert num_ctas > 0, "tmem load requires num_ctas > 0"
+    threads_per_warp = 32
+    return _builder.make_default_tmem_compatible_tensor_layout_encoding(list(tensor.shape),
+                                                                        tensor.dtype.to_ir(_builder), module_num_warps,
+                                                                        threads_per_warp, num_ctas)
+
+
+@tl.builtin
+def local_alloc(
+    shape: tuple,
+    dtype: tl.dtype,
+    num: tl.constexpr,
+    storage: tlx.storage_kind = tlx.storage_kind.smem,
+    layout: Optional[tlx.shared_layout_encoding] = None,
+    _builder=None,
+) -> tlx.buffered_tensors:
+    """
+    Allocates buffer in shared memory and return a view of the buffer.
+    """
+    if storage == tlx.storage_kind.tmem:
+        _assert_blackwell_for_tmem(_builder.options.arch)
+
+    if not isinstance(num, tl.constexpr):
+        user_error = """
+`num` must be a constexpr without introducing any `ast.Assign` nodes,
+otherwise its value will be wrapped as `tensor.handle`.
+For example, following will fail because `num` will be promoted to tl.tensor by semantics.py
+in visit_Assign
+    num = tl.constexpr(2)
+    local_alloc(..., num=num)
+
+To bypass, rewrite it to `local_alloc(..., num=tl.constexpr(2))` or `local_alloc(..., num=2)`
+        """
+        raise ValueError(user_error)
+
+    unwrapped_shape = [tl._unwrap_if_constexpr(dim) for dim in shape]
+    unwrapped_num = tl._unwrap_if_constexpr(num)
+    full_shape = [unwrapped_num] + unwrapped_shape
+    dtype = tl._unwrap_if_constexpr(dtype)
+    elem_type = dtype.to_ir(_builder)
+    if layout is None:
+        if storage == tlx.storage_kind.smem:
+            layout = tlx.swizzled_shared_layout_encoding.make_default(rank=len(shape))
+            layout_handle = _builder.make_swizzled_shared_encoding_attr(
+                layout.vectorSize,
+                layout.perPhase,
+                layout.maxPhase,
+                layout.order,
+                layout.numCTAsPerCGA,
+                layout.numCTASplit,
+                layout.numCTAOrder,
+            )
+        else:
+            layout = tlx.tensor_memory_layout_encoding.make_default(shape)
+            layout_handle = _builder.make_tensor_memory_encoding_attr(
+                layout.blockM,
+                layout.blockN,
+                layout.unpacked,
+                layout.CTASplitM,
+                layout.CTASplitN,
+            )
+    else:
+        raise NotImplementedError("User-specified layout encoding not yet implemented.")
+
+    if storage == tlx.storage_kind.smem:
+        tensor_handle = _builder.create_local_alloc(full_shape, elem_type, layout_handle)
+    else:
+        tensor_handle = _builder.create_tmem_alloc(full_shape, elem_type, layout_handle)
+
+    block_type = tl.block_type(dtype, unwrapped_shape)
+    base_tensor = tlx.buffered_tensor(
+        tensor_handle,
+        block_type,
+        storage,
+        layout,
+    )
+
+    return tlx.buffered_tensors(base_tensor, num)
+
+
+@tl.builtin
+def local_view(
+    local_allocated_buffers: tlx.buffered_tensors | tlx.mbarriers,
+    buffer_idx: int,
+    _builder=None,
+) -> tlx.buffered_tensor | tlx.mbarrier:
+    """
+    Returns a subview of the buffer.
+    """
+    buffer_idx = _convert_elem_to_ir_value(_builder, buffer_idx, require_i64=False)
+    base_tensor = local_allocated_buffers.base_tensor
+    view_shape = base_tensor.shape
+    view_type = tl.block_type(base_tensor.type.element_ty, view_shape)
+    view_handle = _builder.create_memdesc_subview(base_tensor.handle, buffer_idx)
+    if isinstance(local_allocated_buffers, tlx.mbarriers):
+        return tlx.mbarrier(view_handle, )
+    else:
+        return tlx.buffered_tensor(
+            view_handle,
+            view_type,
+            base_tensor.storage,
+            base_tensor.layout,
+        )
+
+
+@tl.builtin
+def subslice(
+    local_allocated_buffer: tlx.buffered_tensor,
+    offset: int,
+    size: int,
+    _builder=None,
+) -> tlx.buffered_tensor:
+    """
+    Returns a subslice of the buffer (in TMEM). The source has to be 128xN and the slicing is
+    along the innermost dimension.
+
+    :param local_allocated_buffer: the source buffer
+    :param offset: the start offset of the subslice, in terms of number of elements
+    :param size: the size of the subslice, in terms of number of elements
+    """
+    # this is for TMEM subslice
+    assert local_allocated_buffer.storage == tlx.storage_kind.tmem, "subslice is only supported for tmem"
+    assert isinstance(local_allocated_buffer.type, tl.block_type), "subslice src is not block type"
+    subslice_shape = [dim for dim in local_allocated_buffer.type.shape[:-1]] + [size]
+    subslice_type = tl.block_type(local_allocated_buffer.type.element_ty, subslice_shape)
+    return tlx.buffered_tensor(
+        _builder.create_tmem_subslice(local_allocated_buffer.handle, offset, size),
+        subslice_type,
+        local_allocated_buffer.storage,
+        local_allocated_buffer.layout,
+    )
+
+
+@tl.builtin
+def async_load(
+    src: tl.tensor,
+    result: tlx.buffered_tensor,
+    mask: Optional[tl.tensor] = None,
+    other: Optional[tl.tensor] = None,
+    cache_modifier: str = "",
+    eviction_policy: str = "",
+    is_volatile: bool = False,
+    _builder=None,
+) -> tlx.async_token:
+    """
+    Loads buffer from global to local memory asynchronously.
+    """
+    if src.type.is_ptr() and src.type.element_ty.is_block():
+        # Load by a block pointer: `pointer_type<block_type<>>`
+        # unsupported for now
+        raise NotImplementedError("async_load by block pointer is not supported yet")
+    else:
+        # Load by a tensor of pointers or a pointer of scalar: `block_type<pointer_type<>>` or `pointer_type<>`
+        _, mask, other = _prepare_legacy_load(src, mask, other, None, None, _builder)
+
+    cache = _str_to_load_cache_modifier(cache_modifier)
+    eviction = _str_to_eviction_policy(eviction_policy)
+    return tlx.async_token(
+        _builder.create_async_load(
+            src.handle,
+            result.handle,
+            mask.handle if mask else None,
+            other.handle if other else None,
+            cache,
+            eviction,
+            is_volatile,
+        ))
+
+
+@tl.builtin
+def async_load_commit_group(
+    tokens: list[tlx.async_token] = [],
+    _builder=None,
+) -> tlx.async_token:
+    """
+    Commits all prior initiated but uncommitted async_load ops an async group.
+    Each token represents a tracked async load operation.
+    """
+    handles = [t.handle for t in tokens]
+    return tlx.async_token(_builder.create_async_commit_group(handles))
+
+
+@tl.builtin
+def async_load_wait_group(
+    pendings: tl.constexpr,
+    tokens: list[tlx.async_token] = [],
+    _builder=None,
+) -> tlx.async_token:
+    """
+    Wait for completion of prior asynchronous copy operations.
+    Each token represents a tracked async commit group operation.
+    """
+    pendings = tl._unwrap_if_constexpr(pendings)
+    handles = [t.handle for t in tokens]
+    return tlx.async_token(_builder.create_async_wait(handles, pendings))
+
+
+@tl.builtin
+def local_load(
+    src: tlx.buffered_tensor,
+    storage: tlx.storage_kind = tlx.storage_kind.smem,
+    token: tlx.async_token = None,
+    _builder=None,
+) -> tl.tensor:
+    """
+    Loads buffer from local or tensor memory into a distributed tensor.
+    """
+    if storage == tlx.storage_kind.tmem:
+        _assert_blackwell_for_tmem(_builder.options.arch)
+        tmem_compatible_layout_encoding = _create_tmem_compatible_tensor_layout_encoding(_builder, src)
+        load_handle = _builder.create_tmem_load(src.handle, tmem_compatible_layout_encoding,
+                                                token.handle if token else None)
+        output = _builder.create_release_layout(load_handle)
+        return tl.tensor(output, src.type)
+
+    return tl.tensor(_builder.create_local_load(src.handle, token.handle if token else None), src.type)
+
+
+@tl.builtin
+def local_store(
+    dst: tlx.buffered_tensor,
+    src: tl.tensor,
+    storage: tlx.storage_kind = tlx.storage_kind.smem,
+    _builder=None,
+) -> tl.tensor:
+    """
+    Store a distributed tensor into a buffer in local or tensor memory.
+    """
+    if storage == tlx.storage_kind.tmem:
+        _assert_blackwell_for_tmem(_builder.options.arch)
+        tmem_compatible_layout_encoding = _create_tmem_compatible_tensor_layout_encoding(_builder, dst)
+        src_handle = _builder.create_require_layout(src.handle, tmem_compatible_layout_encoding)
+        return tl.tensor(_builder.create_tmem_store(dst.handle, src_handle), tl.void)
+
+    return tl.tensor(_builder.create_local_store(dst.handle, src.handle), tl.void)
+
+
+@tl.builtin
+def local_trans(input: tlx.buffered_tensor, dims: Tuple[int] = (1, 0), _builder=None) -> tlx.buffered_tensor:
+    """
+        Permutes the dimensions of a tensor.
+
+        If the parameter :code:`dims` is not specified, the function defaults to a (1,0) permutation,
+        effectively transposing a 2D tensor.
+
+        :param input: The input tensor.
+        :param dims: The desired ordering of dimensions.  For example,
+            :code:`(2, 1, 0)` reverses the order dims in a 3D tensor.
+    """
+    if len(input.shape) != len(dims):
+        raise ValueError("permute dims must have the same length as input shape")
+    if sorted(tl._unwrap_if_constexpr(d) for d in dims) != list(range(len(dims))):
+        raise ValueError(f"permute dims must be a permutation of 0, 1, ..., n-1, but were {dims}")
+
+    permuted_handle = _builder.create_memdesc_trans(input.handle, dims)
+    return input.make_permute(permuted_handle, dims)
+
+
+@tl.builtin
+def async_descriptor_load(
+    desc: tl.tensor_descriptor_base,
+    result: tlx.buffered_tensor,
+    offsets: list[tl.tensor],
+    barrier: tlx.mbarrier,
+    cache_modifier: str = "",
+    eviction_policy: str = "",
+    _builder=None,
+) -> None:
+    assert isinstance(desc, tl.tensor_descriptor_base)
+    ndim = len(desc.block_shape)
+    assert len(offsets) == ndim, f"expected {ndim} offsets, but got {len(offsets)}"
+    result_handle = require_nv_mma_shared_layout(result, _builder)
+    offsets = _convert_to_ir_values(_builder, offsets, require_i64=False)
+    cache = _str_to_load_cache_modifier(cache_modifier)
+    eviction = _str_to_eviction_policy(eviction_policy)
+    _builder.create_async_TMA_load(desc.handle, offsets, barrier.handle, result_handle, cache, eviction, False)
+
+
+@tl.builtin
+def async_descriptor_store(
+    desc: tl.tensor_descriptor_base,
+    source: tlx.buffered_tensor,
+    offsets: list[tl.tensor],
+    _builder=None,
+) -> None:
+    assert isinstance(desc, tl.tensor_descriptor_base)
+    ndim = len(desc.block_shape)
+    assert len(offsets) == ndim, f"expected {ndim} offsets, but got {len(offsets)}"
+    source_handle = require_nv_mma_shared_layout(source, _builder)
+    offsets = _convert_to_ir_values(_builder, offsets, require_i64=False)
+    _builder.create_async_TMA_store(desc.handle, offsets, source_handle)

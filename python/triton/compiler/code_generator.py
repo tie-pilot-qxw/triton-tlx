@@ -20,6 +20,12 @@ from .._utils import find_paths_if, get_iterable_path, set_iterable_path
 
 from .errors import (CompilationError, CompileTimeAssertionFailure, UnsupportedLanguageConstruct)
 
+from triton.tlx.compiler.dispatch import TLX_WITH_DISPATCH
+
+WITH_DISPATCH = {}  # central registry for all 'with' handlers
+
+WITH_DISPATCH.update(TLX_WITH_DISPATCH)
+
 
 def check_identifier_legality(name, type):
     pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*$'
@@ -127,6 +133,8 @@ class enter_sub_region:
         self.liveins = _clone_scope(self.generator.lscope)
         self.prev_defs = _clone_scope(self.generator.local_defs)
         self.generator.local_defs = {}
+        self.used_vars = self.generator.used_vars.copy()
+        self.generator.used_vars = set()
         self.insert_block = self.generator.builder.get_insertion_block()
         self.insert_point = self.generator.builder.get_insertion_point()
         return self.liveins, self.insert_block
@@ -135,6 +143,7 @@ class enter_sub_region:
         self.generator.builder.restore_insertion_point(self.insert_point)
         self.generator.lscope = self.liveins
         self.generator.local_defs = self.prev_defs
+        self.generator.used_vars |= self.used_vars
 
 
 # Check if the given syntax node has an "early" return
@@ -344,6 +353,7 @@ class CodeGenerator(ast.NodeVisitor):
         # SSA-construction
         # name => language.tensor
         self.local_defs: Dict[str, tensor] = {}
+        self.used_vars = set()
         self.dereference_name: Callable[[str], Any] = self._define_name_lookup()
         self.fn = None
         # Are we currently visiting an ast.arg's default value?  These have some
@@ -666,6 +676,8 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_Name(self, node):
         if type(node.ctx) is ast.Store:
             return node.id
+        if isinstance(node.ctx, (ast.Load, ast.Store)):
+            self.used_vars.add(node.id)
         return self.dereference_name(node.id)
 
     def visit_Store(self, node):
@@ -978,6 +990,19 @@ class CodeGenerator(ast.NodeVisitor):
             f'Loop-carried variable {name} has initial type {live_val.type} '\
             f'but is re-assigned to {loop_val.type} in loop! '\
             f'Please make sure that the type stays consistent.'
+
+    def visit_withitem(self, node):
+        return self.visit(node.context_expr)
+
+    def visit_With(self, node):
+        assert len(node.items) == 1
+        context = node.items[0].context_expr
+        if isinstance(context, ast.Call):
+            withitemClass = self.visit(context.func)
+            handler = WITH_DISPATCH.get(withitemClass)
+            if handler:
+                return handler(self, node)
+        return self.visit_compound_statement(node.body)
 
     def visit_While(self, node):
         with enter_sub_region(self) as sr:
