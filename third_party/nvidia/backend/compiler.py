@@ -290,7 +290,8 @@ class CUDABackend(BaseBackend):
                 )
             else:
                 passes.ttgpuir.add_warp_specialize(pm, opt.num_stages)
-            passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled)
+            if opt.num_consumer_groups == 0:
+                passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled)
             passes.ttgpuir.add_combine_tensor_select_and_if(pm)
             nvidia.passes.ttnvgpuir.add_remove_tmem_tokens(pm)
             passes.ttgpuir.add_ws_lowering(pm, opt.num_consumer_groups)
