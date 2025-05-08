@@ -871,15 +871,16 @@ ttng::WaitBarrierOp waitGen5Done(OpBuilderWithAsyncTaskIds &builder,
 
 // Make TCGen5MMAOp fully asynchronous by de-synchronizing it. This leverages
 // its inline barrier to synchronize with both the producer (TMA load) and the
-// consumer (TMEM load). Return the WaitBarrierOp inserted before the consumer
-// (TMEM load).
+// consumer (TMEM load). If the inline barrier is used for A/B operands of gen5,
+// insert WaitBarrier as ProducerAquire; If it is used for D operand, insert
+// WaitBarrier as ConsumerWait.
 void desyncTCGen5MMAOp(OpBuilderWithAsyncTaskIds &builder,
                        nvidia_gpu::TCGen5MMAOp mmaOp, Value barrierAlloc,
                        Value bufferIdx, Value inPhase, unsigned numBuffers,
                        Operation *producerOrConsumer,
                        DenseSet<Operation *> &opsWithChannels,
                        SmallVector<Operation *> &opsWithBufferReuse,
-                       mlir::DominanceInfo &dom) {
+                       mlir::DominanceInfo &dom, bool asProducerAcquire) {
 
   // Attach the barrier as an operand of the mma op.
   builder.setInsertionPoint(mmaOp);
@@ -899,11 +900,15 @@ void desyncTCGen5MMAOp(OpBuilderWithAsyncTaskIds &builder,
   auto producerBarrier =
       getBarrierForPipelineStage(builder, barrierAlloc, bufferIdx);
   // curPhase = curPhase xor True for emptyBarrier.
+  Value phase = inPhase;
   auto loc = producerOrConsumer->getLoc();
-  Value _1_1b = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 1);
-  // Creating phase for producerOrConsumer.
-  Value phase =
-      builder.createWithAsyncTaskIds<mlir::arith::XOrIOp>(loc, inPhase, _1_1b);
+  if (asProducerAcquire) {
+    Value _1_1b =
+        builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 1);
+    // Creating phase for producerOrConsumer.
+    phase = builder.createWithAsyncTaskIds<mlir::arith::XOrIOp>(loc, inPhase,
+                                                                _1_1b);
+  }
   phase = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
       loc, builder.getI32Type(), phase);
   builder.createWithAsyncTaskIds<ttng::WaitBarrierOp>(loc, producerBarrier,
@@ -919,6 +924,7 @@ void desyncTCGen5MMAOp(OpBuilderWithAsyncTaskIds &builder,
 #endif
 }
 
+#if 0
 ttng::WaitBarrierOp waitGen5Done(OpBuilderWithAsyncTaskIds &builder,
                                  nvidia_gpu::TCGen5MMAOp mmaOp,
                                  Value barrierAlloc, Value bufferIdx,
@@ -987,6 +993,7 @@ ttng::WaitBarrierOp waitGen5Done(OpBuilderWithAsyncTaskIds &builder,
 
   llvm_unreachable("Failed to find the consumer of the mma op");
 }
+#endif
 
 // Lower producers for channels. Here channels are grouped in
 // "channelsGroupedByConsumers". tokenMap tracks the set of tokens for each
@@ -1213,7 +1220,7 @@ void insertAsyncComm(
         desyncTCGen5MMAOp(builder, cast<nvidia_gpu::TCGen5MMAOp>(mmaOp),
                           *commChannel.producerBarrier, bufferIdx, phase,
                           masterChannel->numBuffers, headConsumer,
-                          opsWithChannels, opsWithBufferReuse, dom);
+                          opsWithChannels, opsWithBufferReuse, dom, false);
       }
     }
     // Channel can have multiple consumers.
@@ -1250,7 +1257,7 @@ void insertAsyncComm(
           // auto tmemWaitBarrier =
           desyncTCGen5MMAOp(builder, mmaOp, consumerBarrier, bufferIdx, phase,
                             masterChannel->numBuffers, headProducer,
-                            opsWithChannels, opsWithBufferReuse, dom);
+                            opsWithChannels, opsWithBufferReuse, dom, true);
           // tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
         } /*else if (!tmemWaitBarriers.count(mmaOp)) {
           LLVM_DEBUG({
@@ -1277,6 +1284,10 @@ void insertAsyncComm(
         builder.setInsertionPoint(producerAcquirePoint);
         builder.createWithAsyncTaskIds<ttng::ProducerAcquireOp>(
             headProducer->getLoc(), token.second, bufferIdx, phase);
+        LLVM_DEBUG({
+          LDBG("Insert ProducerAcquireOp ");
+          producerAcquirePoint->dump();
+        });
       }
 
       if (!commChannel.producerBarrier) {
