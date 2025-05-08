@@ -19,4 +19,5 @@ add_triton_library(TritonNvidiaGPUTransforms
   TritonGPUTransforms
   TritonNvidiaGPUIR
   MLIRTransformUtils
+  NVHopperTransforms
 )
