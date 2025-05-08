@@ -3,6 +3,14 @@
 #include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/ArrayRef.h"
 #include <memory>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#include <pybind11/stl_bind.h>
+
+namespace py = pybind11;
+
+using namespace mlir;
+using namespace triton;
 
 typedef int AsyncTaskId;
 void setAsyncTaskIds(mlir::Operation *op,
@@ -103,3 +111,7 @@ private:
   bool lineInfoEnabled =
       !mlir::triton::tools::getBoolEnv("TRITON_DISABLE_LINE_INFO");
 };
+
+namespace ir {
+extern py::class_<TritonOpBuilder> *getBuilderClass();
+} // namespace ir
