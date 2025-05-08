@@ -168,3 +168,21 @@ tt.func @cf_br(%ptr: !tt.ptr<i32>) {
   tt.store %ptrs, %arg0 : tensor<128x!tt.ptr<i32>>
   tt.return
 }
+
+// -----
+
+// CHECK-LABEL: @legalize_warp_specialize
+tt.func @legalize_warp_specialize(%arg0: !tt.ptr<i32>, %arg1: !tt.ptr<i32>) {
+  ttg.warp_specialize(%arg0)
+  default {
+    ttg.warp_yield
+  }
+  partition0(%arg2: !tt.ptr<i32>) num_warps(2) {
+    // CHECK: tt.splat {{.*}} : !tt.ptr<i32> -> tensor<256x!tt.ptr<i32>, #blocked>
+    // CHECK: tt.load {{.*}} : tensor<256x!tt.ptr<i32>, #blocked>
+    %splatted = tt.splat %arg2 : !tt.ptr<i32> -> tensor<256x!tt.ptr<i32>>
+    %input = tt.load %splatted : tensor<256x!tt.ptr<i32>>
+    ttg.warp_return
+  } : (!tt.ptr<i32>) -> ()
+  tt.return
+}

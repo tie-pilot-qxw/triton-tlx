@@ -11,6 +11,10 @@
 #include "proton/Dialect/include/Dialect/ProtonGPU/IR/Dialect.h"
 #include "proton/Dialect/include/Dialect/ProtonGPU/Transforms/Passes.h"
 #include "triton/Dialect/Gluon/Transforms/Passes.h"
+#include "third_party/nvidia/include/Dialect/NVGPU/IR/Dialect.h"
+#include "third_party/nvidia/include/Dialect/NVWS/IR/Dialect.h"
+#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+#include "third_party/tlx/dialect/include/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonInstrument/IR/Dialect.h"
@@ -30,6 +34,7 @@
 #include "nvidia/include/Dialect/NVWS/Transforms/Passes.h"
 #include "nvidia/include/NVGPUToLLVM/Passes.h"
 #include "nvidia/include/TritonNVIDIAGPUToLLVM/Passes.h"
+#include "tlx/dialect/include/Transforms/Passes.h"
 #include "triton/Conversion/TritonGPUToLLVM/Passes.h"
 #include "triton/Conversion/TritonToTritonGPU/Passes.h"
 #include "triton/Target/LLVMIR/Passes.h"
@@ -109,6 +114,7 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   // NVGPU transform passes
   mlir::registerNVHopperTransformsPasses();
 
+<<<<<<< HEAD
   // Proton passes
   mlir::test::proton::registerTestScopeIdAllocationPass();
   mlir::triton::proton::registerConvertProtonToProtonGPU();
@@ -131,4 +137,19 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
       mlir::triton::proton::ProtonDialect,
       mlir::triton::proton::gpu::ProtonGPUDialect, mlir::ROCDL::ROCDLDialect,
       mlir::triton::gluon::GluonDialect>();
+=======
+  // TLX passes
+  mlir::triton::tlx::registerPasses();
+
+  registry.insert<mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,
+                  mlir::triton::nvidia_gpu::TritonNvidiaGPUDialect,
+                  mlir::triton::gpu::TritonGPUDialect, mlir::math::MathDialect,
+                  mlir::arith::ArithDialect, mlir::scf::SCFDialect,
+                  mlir::gpu::GPUDialect, mlir::LLVM::LLVMDialect,
+                  mlir::NVVM::NVVMDialect, mlir::triton::nvgpu::NVGPUDialect,
+                  mlir::triton::nvws::NVWSDialect,
+                  mlir::triton::amdgpu::TritonAMDGPUDialect,
+                  mlir::triton::proton::ProtonDialect,
+                  mlir::ROCDL::ROCDLDialect, mlir::triton::tlx::TLXDialect>();
+>>>>>>> 130097e5f ([TLX-rebase][1/2] Resolve merge conflicts without running tests)
 }

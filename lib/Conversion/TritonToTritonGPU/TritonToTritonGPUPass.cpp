@@ -3,12 +3,15 @@
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+#include "third_party/tlx/dialect/include/IR/Dialect.h"
 #include "triton/Conversion/TritonToTritonGPU/Passes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
 namespace mlir::triton {
 #define GEN_PASS_DEF_CONVERTTRITONTOTRITONGPU
@@ -540,6 +543,51 @@ public:
   }
 };
 
+class TritonWarpSpecializePattern
+    : public OpConversionPattern<WarpSpecializeOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(WarpSpecializeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Type> newResultTypes;
+    for (auto type : op.getResultTypes()) {
+      Type newType = typeConverter->convertType(type);
+      if (!newType)
+        return rewriter.notifyMatchFailure(op, "not a 1:1 type conversion");
+      newResultTypes.push_back(newType);
+    }
+
+    auto newOp = rewriter.create<WarpSpecializeOp>(
+        op.getLoc(), newResultTypes, op.getPartitionNumWarps(),
+        op.getPartitionRegions().size());
+
+    // Update the operands and types.
+    newOp->setOperands(adaptor.getOperands());
+
+    rewriter.inlineRegionBefore(op.getDefaultRegion(), newOp.getDefaultRegion(),
+                                newOp.getDefaultRegion().end());
+    // Retype region arguments
+    if (failed(rewriter.convertRegionTypes(&newOp.getDefaultRegion(),
+                                           *getTypeConverter()))) {
+      return rewriter.notifyMatchFailure(op, "could not convert body types");
+    }
+
+    for (auto [oldRegion, newRegion] : llvm::zip_equal(
+             op.getPartitionRegions(), newOp.getPartitionRegions())) {
+      rewriter.inlineRegionBefore(*oldRegion, *newRegion, newRegion->end());
+      // Retype region arguments
+      if (failed(rewriter.convertRegionTypes(newRegion, *getTypeConverter()))) {
+        return rewriter.notifyMatchFailure(op, "could not convert body types");
+      }
+    }
+
+    rewriter.replaceOp(op, newOp.getResults());
+    return success();
+  }
+};
+
 void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
                             RewritePatternSet &patterns, unsigned numCTAs) {
   MLIRContext *context = patterns.getContext();
@@ -573,7 +621,11 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       TritonExpandDimsPattern,
       TritonTransPattern,
       TritonDotPattern,
+<<<<<<< HEAD
       TritonMapElementwisePattern,
+=======
+      TritonWarpSpecializePattern,
+>>>>>>> 130097e5f ([TLX-rebase][1/2] Resolve merge conflicts without running tests)
       GatherScatterOpPattern<DescriptorGatherOp>,
       GatherScatterOpPattern<DescriptorScatterOp>,
       GenericOpPattern<triton::LoadOp>,
@@ -592,10 +644,38 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<triton::DotScaledOp>,
       GenericOpPattern<triton::CallOp>,
       GenericOpPattern<ReturnOp>,
-      TritonFuncOpPattern
-      // clang-format on
-      >(typeConverter, context);
+      GenericOpPattern<triton::gpu::AsyncCopyGlobalToLocalOp>,
+      GenericOpPattern<triton::gpu::LocalStoreOp>,
+      GenericOpPattern<triton::gpu::LocalLoadOp>,
+      GenericOpPattern<triton::nvidia_gpu::WarpGroupDotWaitOp>,
+      TritonFuncOpPattern>(typeConverter, context);
 }
+<<<<<<< HEAD
+=======
+// Proton patterns
+// NOTE: Because Proton's inputs are scalars and not tensors this conversion
+// isn't strictly necessary however you could envision a case where we pass in
+// tensors in for Triton object specific tracing operations in which case we
+// would need to fill in the OpConversionPattern
+void populateProtonPatterns(TritonGPUTypeConverter &typeConverter,
+                            RewritePatternSet &patterns) {
+  MLIRContext *context = patterns.getContext();
+  patterns.add<GenericOpPattern<triton::proton::RecordOp>>(typeConverter,
+                                                           context);
+}
+// TLX patterns
+// NOTE: Because Proton's inputs are scalars and not tensors this conversion
+// isn't strictly necessary however you could envision a case where we pass in
+// tensors in for Triton object specific tracing operations in which case we
+// would need to fill in the OpConversionPattern
+void populateTLXPatterns(TritonGPUTypeConverter &typeConverter,
+                            RewritePatternSet &patterns) {
+  MLIRContext *context = patterns.getContext();
+  patterns.add<GenericOpPattern<triton::tlx::RequireLayoutOp>>(typeConverter, context);
+  patterns.add<GenericOpPattern<triton::tlx::ReleaseLayoutOp>>(typeConverter,
+                                                           context);
+}
+>>>>>>> 130097e5f ([TLX-rebase][1/2] Resolve merge conflicts without running tests)
 //
 // SCF patterns
 //
@@ -809,6 +889,11 @@ public:
     populateArithPatternsAndLegality(typeConverter, patterns, target);
     populateMathPatternsAndLegality(typeConverter, patterns, target);
     populateTritonPatterns(typeConverter, patterns, numCTAs);
+<<<<<<< HEAD
+=======
+    populateProtonPatterns(typeConverter, patterns);
+    populateTLXPatterns(typeConverter, patterns);
+>>>>>>> 130097e5f ([TLX-rebase][1/2] Resolve merge conflicts without running tests)
     // TODO: can we use
     //    mlir::scf::populateSCFStructurealTypeConversionsAndLegality(...) here?
     populateSCFPatterns(typeConverter, patterns);
