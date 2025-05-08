@@ -112,6 +112,14 @@ void init_gluon_ir(py::module &&m) {
            ret::reference)
       .def("get_partition_op_holder",
            &ttg::WarpSpecializeOp::getPartitionOpHolder, ret::reference)
+      .def(
+          "get_partition_region",
+          [](ttg::WarpSpecializeOp self, unsigned idx) -> Region & {
+            if (idx >= self.getNumRegions())
+              throw pybind11::index_error("Op region index out of range");
+            return *self.getPartitionRegions()[idx];
+          },
+          ret::reference)
       .def("set_requested_registers", [](ttg::WarpSpecializeOp &self,
                                          std::vector<int> &requestedRegisters) {
         self.setRequestedRegisters(requestedRegisters);

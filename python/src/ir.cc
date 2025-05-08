@@ -31,6 +31,7 @@
 #include "triton/Dialect/Triton/IR/Types.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.h"
 #include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/Support/FileSystem.h"
@@ -386,7 +387,11 @@ void init_triton_ir(py::module &&m) {
       .def("push_back",
            [](Region &self, Block *block) { self.push_back(block); })
       .def("push_front",
-           [](Region &self, Block *block) { self.push_front(block); });
+           [](Region &self, Block *block) { self.push_front(block); })
+      .def("add_argument", [](Region &self, Type ty) -> BlockArgument {
+        auto loc = UnknownLoc::get(ty.getContext());
+        return self.addArgument(ty, loc);
+      });
 
   py::class_<Block>(m, "block", py::module_local())
       .def("arg",
@@ -526,6 +531,9 @@ void init_triton_ir(py::module &&m) {
   py::class_<scf::WhileOp, OpState>(m, "WhileOp", py::module_local())
       .def("get_before", &scf::WhileOp::getBefore, ret::reference)
       .def("get_after", &scf::WhileOp::getAfter, ret::reference);
+
+  py::class_<ttg::WarpYieldOp, OpState>(m, "WarpYieldOp", py::module_local());
+  py::class_<ttg::WarpReturnOp, OpState>(m, "WarpReturnOp", py::module_local());
   py::class_<scf::ConditionOp, OpState>(m, "ConditionOp", py::module_local());
 
   py::class_<Operation, std::unique_ptr<Operation, py::nodelete>>(
@@ -1716,6 +1724,24 @@ void init_triton_ir(py::module &&m) {
       .def("create_proton_record",
            [](TritonOpBuilder &self, bool isStart, int32_t regionId) -> void {
              self.create<mlir::triton::proton::RecordOp>(isStart, regionId);
+           })
+      // Warp specialize ops
+      .def("create_warp_specialize_op",
+           [](TritonOpBuilder &self, std::vector<int> partitionNumWarps,
+              int numPartitionRegions) -> ttg::WarpSpecializeOp {
+             ArrayRef<Type> dummyTypes;
+             return self.create<ttg::WarpSpecializeOp>(
+                 dummyTypes, partitionNumWarps, numPartitionRegions);
+           })
+      .def("create_warp_yield_op",
+           [](TritonOpBuilder &self) -> ttg::WarpYieldOp {
+             ArrayRef<Type> dummyTypes;
+             return self.create<ttg::WarpYieldOp>(ValueRange{});
+           })
+      .def("create_warp_return_op",
+           [](TritonOpBuilder &self) -> ttg::WarpReturnOp {
+             ArrayRef<Type> dummyTypes;
+             return self.create<ttg::WarpReturnOp>();
            });
 
   py::class_<PassManager>(m, "pass_manager", py::module_local())
