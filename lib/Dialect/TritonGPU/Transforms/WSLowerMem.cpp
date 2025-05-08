@@ -197,8 +197,9 @@ createTMEMCopy(const DenseMap<Channel *, Value> &bufferMap, Channel *channel,
   // Replace original tmem alloc with tmem_store.
   ttng::TmemDataChannel *tmemChannel =
       static_cast<ttng::TmemDataChannel *>(channel);
-  auto oldTMemAllocOp = tmemChannel->getAllocOp();
-  auto newTMemAllocOp = bufferMap.find(channel)->second;
+  auto oldTMemAllocOp = cast<ttng::TMEMAllocOp>(tmemChannel->getAllocOp());
+  auto newTMemAllocOp =
+      cast<ttng::TMEMAllocOp>(bufferMap.find(channel)->second.getDefiningOp());
   OpBuilderWithAsyncTaskIds builder(oldTMemAllocOp);
   builder.setInsertionPointAfter(oldTMemAllocOp);
 
@@ -239,18 +240,26 @@ createTMEMCopy(const DenseMap<Channel *, Value> &bufferMap, Channel *channel,
     builder.setAsyncTaskIdsFromOp(opForStoreTask);
     Value vTrue = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
         oldTMemAllocOp.getLoc(), 1, 1);
-    auto tokType = builder.getType<AsyncTokenType>();
-    mlir::Value emptyDep;
+    // Promote TMEMAlloc to start, create TMEMStore.
+    // auto tokType = builder.getType<AsyncTokenType>();
+    // tokType, srcView, oldTMemAllocOp.getToken()
+    // We used to have token from Alloc, then to other users.
+    // FIXME: Type(), srcView, Value(),
+    // OAI's warpspec does the above.
     auto tmemStoreOp = builder.createWithAsyncTaskIds<ttng::TMEMStoreOp>(
-        oldTMemAllocOp.getLoc(), tokType, srcView, emptyDep,
+        oldTMemAllocOp.getLoc(), Type(), srcView, Value(),
         oldTMemAllocOp.getSrc(), vTrue);
-    oldTMemAllocOp->replaceAllUsesWith(srcView.getDefiningOp());
+    oldTMemAllocOp->getResult(0).replaceAllUsesWith(srcView);
+    if (oldTMemAllocOp.getToken())
+      oldTMemAllocOp.getToken().replaceAllUsesWith(newTMemAllocOp.getToken());
     oldTMemAllocOp.erase();
     tmemChannel->tmemProducerOp = tmemStoreOp;
     return {tmemStoreOp, channel->getDstOp()};
   }
   // Handle the case where there is no value for tmem_alloc.
-  oldTMemAllocOp->replaceAllUsesWith(srcView.getDefiningOp());
+  oldTMemAllocOp->getResult(0).replaceAllUsesWith(srcView);
+  if (oldTMemAllocOp.getToken())
+    oldTMemAllocOp.getToken().replaceAllUsesWith(newTMemAllocOp.getToken());
   oldTMemAllocOp.erase();
   // We need a new srcOp now that tmemAlloc is erased, the new SrcOp will be
   // the mmaOp.

@@ -277,6 +277,7 @@ class CUDABackend(BaseBackend):
             # passes.ttgpuir.add_hoist_tmem_alloc(pm)
             nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
             if opt.num_consumer_groups > 0:
+                nvidia.passes.ttnvgpuir.add_remove_tmem_tokens(pm)
                 passes.ttgpuir.add_ws_task_partition(pm, opt.num_consumer_groups)
                 passes.ttgpuir.add_taskid_propagate(pm, opt.num_consumer_groups)
                 passes.ttgpuir.add_ws_data_partition(pm, opt.num_consumer_groups)
@@ -410,7 +411,10 @@ class CUDABackend(BaseBackend):
             fmad = [] if opt.enable_fp_fusion else ['--fmad=false']
             arch = sm_arch_from_capability(capability)
             opt_level = ['--opt-level', '0'] if knobs.nvidia.disable_ptxas_opt else []
-            ptxas_cmd = [ptxas, *line_info, *fmad, '-v', '--g-tensor-memory-access-check', *opt_level, f'--gpu-name={arch}', fsrc.name, '-o', fbin]
+            ptxas_cmd = [
+                ptxas, *line_info, *fmad, '-v', '--g-tensor-memory-access-check', *opt_level, f'--gpu-name={arch}',
+                fsrc.name, '-o', fbin
+            ]
             try:
                 subprocess.run(ptxas_cmd, check=True, close_fds=False, stderr=flog)
                 if os.path.exists(fsrc.name):
