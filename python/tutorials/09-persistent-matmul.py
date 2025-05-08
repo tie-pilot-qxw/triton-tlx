@@ -609,7 +609,6 @@ def matmul_ws_cooperative_set_block_size_hook(nargs):
 
 def matmul_tma_ws_cooperative_get_configs(pre_hook=None):
     return [
-
         triton.Config(
             {
                 "BLOCK_SIZE_M": 128,
