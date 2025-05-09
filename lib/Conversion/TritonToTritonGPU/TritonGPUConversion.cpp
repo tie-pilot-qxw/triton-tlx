@@ -9,9 +9,11 @@
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 
 using namespace mlir;
 using namespace mlir::triton::gpu;
+using namespace mlir::triton::nvidia_gpu;
 
 //
 // TypeConverter
@@ -101,6 +103,20 @@ TritonGPUConversionTarget::TritonGPUConversionTarget(
       return true;
     return false;
   });
+
+  addDynamicallyLegalOp<WarpSpecializeOp>([&](WarpSpecializeOp wsOp) -> bool {
+    bool hasLegalRegions = true;
+    hasLegalRegions =
+        hasLegalRegions && typeConverter.isLegal(&wsOp.getDefaultRegion());
+    for (auto *region : wsOp.getPartitionRegions()) {
+      hasLegalRegions = hasLegalRegions && typeConverter.isLegal(region);
+    }
+    if (hasLegalRegions && typeConverter.isLegal(wsOp)) {
+      return true;
+    }
+    return false;
+  });
+
   addDynamicallyLegalOp<triton::FuncOp>([](triton::FuncOp funcOp) -> bool {
     for (auto arg : funcOp.getArguments()) {
       if (auto tensor = dyn_cast<RankedTensorType>(arg.getType())) {
