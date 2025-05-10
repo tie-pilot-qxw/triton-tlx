@@ -55,7 +55,7 @@ public:
     auto scaledB = scaleArg(rewriter, scaledDotOp, 1, computeType);
     scaledB = cvtDotOperand(scaledB, 1);
     auto newDot = rewriter.create<DotOp>(scaledDotOp.getLoc(), scaledA, scaledB,
-                                         scaledDotOp.getC());
+                                         scaledDotOp.getC(), nullptr);
 
     rewriter.replaceOpWithNewOp<ConvertLayoutOp>(scaledDotOp,
                                                  scaledDotOp.getType(), newDot);

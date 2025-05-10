@@ -729,7 +729,7 @@ public:
     Value scaledB =
         upcastMXFP(b, bScale, dotOp.getBElemType(), dotOp.getFastMath());
     auto newDot = rewriter.create<DotOp>(dotOp.getLoc(), newRetType, scaledA,
-                                         scaledB, newAcc);
+                                         scaledB, newAcc, nullptr);
     rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(dotOp, oldRetType,
                                                       newDot);
     return success();
