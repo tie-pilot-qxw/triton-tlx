@@ -1332,7 +1332,7 @@ class tensor_descriptor_base(base_value):
         return str(self.type)
 
     @builtin
-    def load(self, offsets: List[tensor], latency=None, _builder=None) -> tensor:
+    def load(self, offsets: Sequence[constexpr | tensor], latency=None, _builder=None) -> tensor:
         """Load a block from the descriptor starting at the given element offsets.
 
         Values outside of the tensor bounds will be filled with zeros.
