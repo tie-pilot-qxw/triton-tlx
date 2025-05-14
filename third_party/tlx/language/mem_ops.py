@@ -18,6 +18,4 @@ def local_alloc(
     full_shape = [unwrapped_num] + unwrapped_shape
     dtype = tl._unwrap_if_constexpr(dtype)
     elem_type = dtype.to_ir(_builder)
-    return tlx.buffered_tensor(
-        _builder.create_local_alloc(full_shape, elem_type),
-    )
+    return tlx.buffered_tensor(_builder.create_local_alloc(full_shape, elem_type), )
