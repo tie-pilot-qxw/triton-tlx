@@ -274,16 +274,17 @@ class CUDABackend(BaseBackend):
             passes.common.add_canonicalizer(pm)
             passes.ttir.add_triton_licm(pm)
             passes.ttgpuir.add_optimize_accumulator_init(pm)
-            if opt.num_consumer_groups == 0: #<= 1:
+            #if opt.num_consumer_groups == 0: #<= 1:
                 # this pass doesn't work with data partitioning, it may not
                 # work with code partitioning
-                passes.ttgpuir.add_hoist_tmem_alloc(pm)
-            nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
+            #    passes.ttgpuir.add_hoist_tmem_alloc(pm)
+            passes.ttgpuir.add_hoist_tmem_alloc(pm)
+            #nvidia.passes.ttnvgpuir.add_promote_lhs_to_tmem(pm)
             if opt.num_consumer_groups > 0:
                 nvidia.passes.ttnvgpuir.add_remove_tmem_tokens(pm)
                 passes.ttgpuir.add_ws_task_partition(pm, opt.num_consumer_groups)
                 passes.ttgpuir.add_taskid_propagate(pm, opt.num_consumer_groups)
-                passes.ttgpuir.add_ws_data_partition(pm, opt.num_consumer_groups)
+                # passes.ttgpuir.add_ws_data_partition(pm, opt.num_consumer_groups)
                 # passes.ttgpuir.add_hoist_tmem_alloc(pm)
                 passes.ttgpuir.add_ws_code_partition(
                     pm,
