@@ -432,18 +432,24 @@ static void groupTasksToRegion(
       if (hasOtherTensorOp)
         break;
     }
+#if 0
     if (!hasOtherTensorOp && hasGen5MMa) {
       if (mmaTasks.empty())
         mmaTaskId = asyncTaskId;
       mmaTasks.insert(asyncTaskId);
       LDBG("groupTasksToRegion: task " << asyncTaskId << " is gen5 mma task");
     }
+#endif
   }
   // Merge all mmaTasks in one group.
   for (AsyncTaskId asyncTaskId : getNestedAsyncTaskIds(funcOp)) {
     if (!mmaTasks.count(asyncTaskId)) {
       tasksToRegion[asyncTaskId].push_back(asyncTaskId);
-      numWarpsForTask[asyncTaskId] = 4; // FIXME: hard-code to 4
+      // FIXME: HardCode for TK config.
+      if (asyncTaskId >= 2)
+        numWarpsForTask[asyncTaskId] = 1; // FIXME: hard-code to 4
+      else
+        numWarpsForTask[asyncTaskId] = 8;
     } else {
       tasksToRegion[mmaTaskId].push_back(asyncTaskId);
       numWarpsForTask[asyncTaskId] = 4; // FIXMME: hard-code to 1;

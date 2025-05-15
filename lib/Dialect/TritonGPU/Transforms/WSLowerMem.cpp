@@ -248,11 +248,15 @@ createTMEMCopy(const DenseMap<Channel *, Value> &bufferMap, Channel *channel,
   // A tmemChannel is usually centered around a gen5 dotOp. There are two
   // cases, one is that the channel is for the accumulator, the other is
   // the channel is for operand A of the gen5.
-  // Here we replace tmem_alloc with tmem_store when applicable and create a
-  // subView that is used by tmem_store and also all users of tmem_alloc.
-  // Calculate the taskIds for the subView, and tmem_store.
-  // tmemStore's taskId can be the mmaOp's taskId if alloc.getSrc is available
-  // for mmaOp's taskId, otherwise, it should happen in alloc.getsrc.
+  // After tmem hoist:
+  //   oldTMemAllocOp is also outside of the loop. We replace it with newTMemAllocOp.
+  //   Inside the loop, we have tmem_store and tmem_load.
+  // Without tmem hoist:
+  //   Here we replace tmem_alloc with tmem_store when applicable and create a
+  //   subView that is used by tmem_store and also all users of tmem_alloc.
+  //   Calculate the taskIds for the subView, and tmem_store.
+  //   tmemStore's taskId can be the mmaOp's taskId if alloc.getSrc is available
+  //   for mmaOp's taskId, otherwise, it should happen in alloc.getsrc.
   Operation *opForStoreTask = tmemChannel->getMmaOp();
   if (oldTMemAllocOp.getSrc()) {
     auto taskIds = getAsyncTaskIds(opForStoreTask);
@@ -265,9 +269,12 @@ createTMEMCopy(const DenseMap<Channel *, Value> &bufferMap, Channel *channel,
   // TaskIds for subView should be the union of tmem_store and all users of
   // tmem_alloc.
   SmallVector<AsyncTaskId> asyncTasksSubView = getAsyncTaskIds(opForStoreTask);
+  auto taskBufferIdx = getAsyncTaskIds(srcBufferIdx.getDefiningOp());
   for (auto *user : oldTMemAllocOp->getUsers()) {
     for (auto task : getAsyncTaskIds(user))
-      if (!llvm::is_contained(asyncTasksSubView, task))
+      // Sometimes tmem_store has a long list of taskIds with tmem hoist.
+      if (!llvm::is_contained(asyncTasksSubView, task) &&
+          llvm::is_contained(taskBufferIdx, task))
         asyncTasksSubView.push_back(task);
   }
   builder.setAsynTaskIdsFromArray(asyncTasksSubView);
@@ -276,7 +283,25 @@ createTMEMCopy(const DenseMap<Channel *, Value> &bufferMap, Channel *channel,
   LLVM_DEBUG({
     LDBG("createTMEMCopy: srcView ");
     srcView.dump();
+    srcBufferIdx.dump();
   });
+  // HACK: clear up tmem_store taskIds.
+  // For TK config, store should only happen in task 0 or 1.
+  for (auto *user : oldTMemAllocOp->getUsers()) {
+    if (auto tmemSt = dyn_cast<ttng::TMEMStoreOp>(user)) {
+      SmallVector<AsyncTaskId> newTIds;
+      for (auto task : getAsyncTaskIds(user)) {
+        // Sometimes tmem_store has a long list of taskIds with tmem hoist.
+        if (llvm::is_contained(asyncTasksSubView, task) && (task == 0 || task == 1))
+          newTIds.push_back(task);
+      }
+      setAsyncTaskIds(user, newTIds);
+      LLVM_DEBUG({
+        LDBG("createTMEMCopy: clean up taskIds for tmem_store ");
+        user->dump();
+      });
+    }
+  }
 
   if (oldTMemAllocOp.getSrc()) {
     builder.setAsyncTaskIdsFromOp(opForStoreTask);
@@ -478,6 +503,24 @@ void insertAsyncCopy(
     Value bufferIdx;
     Value phase = Value();
     OpBuilderWithAsyncTaskIds builder(srcOp);
+    // HACK: consumer can be before producer.
+    Operation *firstProducerOrConsumer = nullptr;
+    Operation *dstOp = domininatingChannel->getDstOp();
+    if (srcOp->getBlock() == dstOp->getBlock()) {
+      for (auto &op : srcOp->getBlock()->getOperations()) {
+        if (&op == srcOp || &op == dstOp) {
+          firstProducerOrConsumer = &op;
+          break;
+        }
+      }
+    }
+    if (firstProducerOrConsumer) {
+      LLVM_DEBUG({
+        LDBG("insertAsyncCopy change insertion point ");
+        firstProducerOrConsumer->dump();
+      });
+      builder.setInsertionPoint(firstProducerOrConsumer);
+    }
     // Calculate TaskIds for bufferIdx and phase.
     SmallVector<AsyncTaskId> asyncTasksPC = getAsyncTaskIds(srcOp);
     for (auto channel : mutuallyNonDominatingChannels) {

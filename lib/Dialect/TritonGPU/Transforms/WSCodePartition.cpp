@@ -133,6 +133,11 @@ static void createChannel(Operation *producerOp, Operation *op,
   // or accumulator.
   auto producerTaskIds = getAsyncTaskIds(opndAOfGen5 ? producerOp : op);
   auto producerTaskId = producerTaskIds.front();
+  LLVM_DEBUG({
+      LDBG(" createChannel producerOp: ");
+      producerOp->dump();
+  });
+  bool accOfGen5 = isa<nvidia_gpu::TCGen5MMAOp>(op) && !opndAOfGen5;
   for (auto result : producerOp->getResults()) {
     if (result.use_empty()) {
       continue;
@@ -142,16 +147,23 @@ static void createChannel(Operation *producerOp, Operation *op,
     getTransitiveUsers(result, users);
     for (auto user : users) {
       auto userOp = user.first;
+      // userOp can be op for opnd A of gen5 since opnd A uses the tmem.
       if (op == userOp && !opndAOfGen5)
         continue;
       // rule out users that are not dominated by op
       if (op->getBlock() != userOp->getBlock()) {
+        // HACK: for accOfGen5, do not consider users outside of the scope of gen5.
+        if (accOfGen5) continue;
         if (!dom.properlyDominates(op->getParentOp(), userOp)) {
           continue;
         }
       } else {
-        if (!dom.properlyDominates(op, userOp) && op != userOp)
+        // when we have tmem hoist, we have a tmem_load inside the loop,
+        // but it is before the gen5. make sure we create a channel.
+        if (!accOfGen5 && !dom.properlyDominates(op, userOp) && op != userOp)
           continue;
+        // ignore store.
+        if (accOfGen5 && isa<ttng::TMEMStoreOp>(userOp)) continue;
       }
 
       auto consumerTaskIds = getAsyncTaskIds(userOp);
@@ -768,7 +780,7 @@ static ttg::LocalAllocOp hoistLocalAlloc(OpBuilder &builder, ttg::LocalAllocOp o
 
   Type memdescType =
       ttg::MemDescType::get(shape, allocDescType.getElementType(), allocDescType.getEncoding(),
-                            allocDescType.getMemorySpace(), allocDescType.getMutableMemory());
+                            allocDescType.getMemorySpace(), true);
   return builder.create<ttg::LocalAllocOp>(oldAlloc.getLoc(), memdescType);
 }
 
@@ -912,7 +924,6 @@ void desyncTCGen5MMAOp(OpBuilderWithAsyncTaskIds &builder,
                        DenseSet<Operation *> &opsWithChannels,
                        SmallVector<Operation *> &opsWithBufferReuse,
                        mlir::DominanceInfo &dom, bool asProducerAcquire) {
-
   // Attach the barrier as an operand of the mma op.
   builder.setInsertionPoint(mmaOp);
   builder.setAsyncTaskIdsFromOp(mmaOp);
@@ -1141,6 +1152,7 @@ void insertAsyncComm(
 
     // Find head producer
     auto producerBlock = kv.second.front()->getSrcOp()->getBlock();
+    Operation *firstProducerOrConsumer = nullptr;
     Operation *headProducer = nullptr;
     for (auto &op : producerBlock->getOperations()) {
       if (producerOps.count(&op)) {
@@ -1173,6 +1185,14 @@ void insertAsyncComm(
         break;
       }
     }
+    if (consumerBlock == producerBlock) {
+      for (auto &op : producerBlock->getOperations()) {
+        if (producerOps.count(&op) || consumerOps.count(&op)) {
+          firstProducerOrConsumer = &op;
+          break;
+        }
+      }
+    }
 
     // We have one set of tokens for each channel group.
     auto &commChannel = tokenMap.find(kv.second.front())->second;
@@ -1196,15 +1216,19 @@ void insertAsyncComm(
     Value bufferIdx;
     Value phase = Value();
     if (auto forOp = headProducer->getParentOfType<scf::ForOp>()) {
-      builder.setInsertionPoint(headProducer);
-      LLVM_DEBUG({
-        LDBG("call getBufferIdxAndPhase2 ");
-        headProducer->dump();
-      });
+      // HACK: consumer can be before head in terms of op order.
+      builder.setInsertionPoint(firstProducerOrConsumer ? firstProducerOrConsumer : headProducer);
       getBufferIdxAndPhase(builder, headProducer, kv.second.front()->numBuffers,
                            opsWithChannels, bufferIdx, phase,
                            opsWithBufferReuse);
+      LLVM_DEBUG({
+        LDBG("call getBufferIdxAndPhase2 ");
+        headProducer->dump();
+        bufferIdx.dump();
+      });
+      builder.setInsertionPoint(headProducer);
     } else {
+      // builder insertion point is parentOp of headProducer.
       // Producer is not in a ForOp, create phase and bufferIdx here.
       bufferIdx = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
           headProducer->getLoc(), 0, 32);
@@ -1252,6 +1276,7 @@ void insertAsyncComm(
                           *commChannel.producerBarrier, bufferIdx, phase,
                           masterChannel->numBuffers, headConsumer,
                           opsWithChannels, opsWithBufferReuse, dom, false);
+        // builder insertion point will be updated.
       }
     }
     // Channel can have multiple consumers.
