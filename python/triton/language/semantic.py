@@ -1147,7 +1147,7 @@ def load(ptr: tl.tensor, mask: Optional[tl.tensor], other: Optional[tl.tensor], 
         return _load_legacy(ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile, builder)
 
 
-def descriptor_load(desc: tl.tensor_descriptor_base, offsets, cache_modifier: str, eviction_policy: str,
+def descriptor_load(desc: tl.tensor_descriptor_base, offsets, cache_modifier: str, eviction_policy: str, latency: Optional[int],
                     builder: ir.builder) -> tl.tensor:
     assert isinstance(desc, tl.tensor_descriptor_base)
     ndim = len(desc.block_shape)
@@ -1155,7 +1155,7 @@ def descriptor_load(desc: tl.tensor_descriptor_base, offsets, cache_modifier: st
 
     offsets = _convert_to_ir_values(builder, offsets, require_i64=False)
     x = builder.create_descriptor_load(desc.handle, offsets, _str_to_load_cache_modifier(cache_modifier),
-                                       _str_to_eviction_policy(eviction_policy))
+                                       _str_to_eviction_policy(eviction_policy), latency)
     return tl.tensor(x, desc.block_type)
 
 
