@@ -254,8 +254,15 @@ private:
         product<int64_t>(shapePerCTA) * allocType.getElementTypeBitWidth() / 8;
 
     auto alignment = alloc.getAlignmentOrDefault();
-    allocation->addBuffer<BufferT::BufferKind::Explicit>(alloc, bytes,
-                                                         alignment);
+    int sharingGroup = -1;
+    if (alloc->hasAttr("allocation.shareGroup")) {
+      sharingGroup =
+          mlir::cast<IntegerAttr>(alloc->getAttr("allocation.shareGroup"))
+              .getInt();
+      LDBG("with shareGroup of " << sharingGroup);
+    }
+    allocation->addBuffer<BufferT::BufferKind::Explicit>(
+        alloc, bytes, alignment, sharingGroup);
   }
 
   template <BufferT::BufferKind T>
@@ -514,7 +521,38 @@ private:
   /// (https://dl.acm.org/doi/pdf/10.5555/314500.315082)
   void computeOffsets() {
     SmallVector<BufferT *> buffers;
+    // Handle sharingGroup here. For allocations with the same sharingGroup
+    // get the union of the live range, and union of the regionIds. Put
+    // the largest buffer in buffers.
+    DenseMap<int, SmallVector<BufferT *>> toGroup;
     for (auto bufferIter : bufferRange) {
+      if (bufferIter.first->sharingGroup >= 0)
+        toGroup[bufferIter.first->sharingGroup].push_back(bufferIter.first);
+    }
+    DenseMap<int, BufferT *> sharingIdToRep;
+    for (auto &kv : toGroup) {
+      size_t bigSize = 0;
+      BufferT *rep = nullptr;
+      for (auto *buf : kv.second) {
+        if (buf->size > bigSize) {
+          rep = buf;
+          bigSize = buf->size;
+        }
+      }
+      // FIXME: update live range and regionIds.
+      sharingIdToRep[kv.first] = rep;
+    }
+    for (auto bufferIter : bufferRange) {
+      if (sharingIdToRep.find(bufferIter.first->sharingGroup) !=
+          sharingIdToRep.end()) {
+        if (bufferIter.first !=
+            sharingIdToRep[bufferIter.first->sharingGroup]) {
+          LDBG("-- ignore shared buffer " << bufferIter.first->size << " "
+                                          << bufferIter.first->offset << " "
+                                          << bufferIter.first->sharingGroup);
+          continue;
+        }
+      }
       buffers.emplace_back(bufferIter.first);
     }
 
@@ -543,6 +581,18 @@ private:
     } while (!interference.empty());
 
     LLVM_DEBUG(dumpAllocationSize());
+    // Update allocation for sharingGroup.
+    for (auto &kv : toGroup) {
+      auto *rep = sharingIdToRep[kv.first];
+      for (auto *buf : kv.second) {
+        if (buf != rep) {
+          buf->setOffsetAligned(rep->offset);
+          LDBG("-- set sharing buffer's offset "
+               << buf->size << " " << buf->offset << " " << buf->sharingGroup);
+        }
+      }
+    }
+    LLVM_DEBUG(dumpBuffers());
   }
 
   /// Computes the initial shared memory offsets.
