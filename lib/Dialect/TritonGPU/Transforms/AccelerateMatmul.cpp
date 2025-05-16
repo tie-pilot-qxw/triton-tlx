@@ -395,7 +395,7 @@ public:
       b = getDotOperand(b, 1, minBitwidth);
       newDot = taskIdRewriter.create<DotOp>(
           dotOp.getLoc(), newRetType, a, b, newAcc, dotOp.getInputPrecision(),
-          dotOp.getMaxNumImpreciseAcc(), dotOp.getTtLatency());
+          dotOp.getMaxNumImpreciseAcc(), dotOp.getTtLatencyAttr());
     }
     // convert dot instruction
     rewriter.replaceOpWithNewOp<ConvertLayoutOp>(origDotOp, origDotOp.getType(),
