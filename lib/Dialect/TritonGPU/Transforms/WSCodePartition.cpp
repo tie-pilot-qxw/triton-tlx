@@ -175,6 +175,7 @@ static void createChannel(Operation *producerOp, Operation *op,
       consumerTaskIds.erase(iter, consumerTaskIds.end());
 
       const unsigned NUM_TMEM_BUFFERS = 1; // change to 1 to fit into tmem
+      const unsigned NUM_SMEM_OPND_BUFFERS = 1;
       // Add a channel from the single producer task to consumerTaskIds.
       if (consumerTaskIds.size() > 0) {
         if (auto dotOp = dyn_cast<nvidia_gpu::TCGen5MMAOp>(op)) {
@@ -191,7 +192,7 @@ static void createChannel(Operation *producerOp, Operation *op,
           if (auto tAllocOp = dyn_cast<ttg::LocalAllocOp>(producerOp)) {
             channels.push_back(
                 std::make_unique<Channel>(producerTaskId, consumerTaskIds, userOp,
-                                          user.second, producerNumBuffers));
+                                          user.second, NUM_SMEM_OPND_BUFFERS));
           }
         } else {
           channels.push_back(
@@ -854,7 +855,8 @@ DenseMap<Channel *, Value> createBuffer(
       auto oldTMemAllocOp = tmemChannel->getAllocOp();
       buffer = createTMemAlloc(builder, oldTMemAllocOp, numBuffers);
     } else if (auto oldAlloc = dyn_cast<ttg::LocalAllocOp>(srcOp)) {
-      // Move LocalAlloc to the beginning of the function.
+      // Move LocalAlloc to the beginning of the function. This is usually
+      // for operands of gemm where the operand is in smem.
       buffer = hoistLocalAlloc(builder, oldAlloc, numBuffers);
     } else if (auto tensorType =
                    dyn_cast<RankedTensorType>(srcValue.getType())) {
