@@ -81,7 +81,6 @@ TritonGPUConversionTarget::TritonGPUConversionTarget(
     MLIRContext &context, TritonGPUTypeConverter &typeConverter)
     : ConversionTarget(context) {
   // TODO: we should also verify ops of TritonGPUDialect
-  addLegalDialect<triton::gpu::TritonGPUDialect>();
 
   // Some ops from SCF are illegal
   addIllegalOp<scf::ExecuteRegionOp, scf::ParallelOp, scf::ReduceOp,
@@ -89,8 +88,19 @@ TritonGPUConversionTarget::TritonGPUConversionTarget(
 
   addDynamicallyLegalDialect<arith::ArithDialect, math::MathDialect,
                              triton::TritonDialect, cf::ControlFlowDialect,
-                             scf::SCFDialect, ub::UBDialect>(
-      [&](Operation *op) { return isDynamicallyLegal(op, typeConverter); });
+                             scf::SCFDialect, ub::UBDialect,
+                             triton::gpu::TritonGPUDialect,
+                             triton::nvidia_gpu::TritonNvidiaGPUDialect>(
+      [&](Operation *op) {
+        bool hasLegalRegions = true;
+        for (auto &region : op->getRegions()) {
+          hasLegalRegions = hasLegalRegions && typeConverter.isLegal(&region);
+        }
+        if (hasLegalRegions && typeConverter.isLegal(op)) {
+          return true;
+        }
+        return false;
+      });
 
   // We have requirements for the data layouts
   addDynamicallyLegalOp<triton::DotOp>([](triton::DotOp dotOp) -> bool {
@@ -116,6 +126,14 @@ TritonGPUConversionTarget::TritonGPUConversionTarget(
     }
     return false;
   });
+
+  addDynamicallyLegalOp<triton::gpu::AsyncCopyGlobalToLocalOp>(
+      [&](triton::gpu::AsyncCopyGlobalToLocalOp asyncGlobalToLocal) -> bool {
+        Attribute srcEncoding =
+            dyn_cast<RankedTensorType>(asyncGlobalToLocal.getSrc().getType())
+                .getEncoding();
+        return srcEncoding != nullptr;
+      });
 
   addDynamicallyLegalOp<triton::FuncOp>([](triton::FuncOp funcOp) -> bool {
     for (auto arg : funcOp.getArguments()) {

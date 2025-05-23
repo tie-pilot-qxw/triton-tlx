@@ -620,9 +620,8 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<triton::DotScaledOp>,
       GenericOpPattern<triton::CallOp>,
       GenericOpPattern<ReturnOp>,
-      TritonFuncOpPattern
-      // clang-format on
-      >(typeConverter, context);
+      GenericOpPattern<triton::gpu::AsyncCopyGlobalToLocalOp>,
+      TritonFuncOpPattern>(typeConverter, context);
 }
 // Proton patterns
 // NOTE: Because Proton's inputs are scalars and not tensors this conversion
