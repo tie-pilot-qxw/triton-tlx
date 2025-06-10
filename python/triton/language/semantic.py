@@ -1,13 +1,14 @@
 from __future__ import annotations  # remove after python 3.11
 import warnings
 
-from typing import List, Optional, Sequence, Tuple, TypeVar
+from typing import List, Optional, Sequence, Tuple, TypeVar, Any
 import numbers
 
 from triton.runtime import driver
 
 from .._C.libtriton import ir
 from . import core as tl
+from .. import knobs
 
 T = TypeVar('T')
 
@@ -1546,8 +1547,22 @@ def _str_to_dot_input_precision(input_precision, builder):
     return getattr(ir.INPUT_PRECISION, input_precision)
 
 
-def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optional[str], max_num_imprecise_acc: int,
-        out_dtype: tl.dtype, builder: ir.builder) -> tl.tensor:
+def dot_precheck(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optional[str], allow_tf32,
+                 max_num_imprecise_acc: int, out_dtype: tl.dtype, builder: ir.builder) -> Tuple[Any]:
+    input_precision = tl._unwrap_if_constexpr(input_precision)
+    allow_tf32 = tl._unwrap_if_constexpr(allow_tf32)
+    assert input_precision is None or tl._unwrap_if_constexpr(
+        allow_tf32) is None, "Only one of input_precision and allow_tf32 can be specified"
+    if input_precision is None:
+        supports_tf32 = builder and "tf32" in builder.options.allowed_dot_input_precisions
+        input_precision = knobs.language.fp32_default or ("tf32" if (supports_tf32 and
+                                                                     (allow_tf32 or allow_tf32 is None)) else "ieee")
+
+    input_precision = tl._unwrap_if_constexpr(input_precision)
+    out_dtype = tl._unwrap_if_constexpr(out_dtype)
+    max_num_imprecise_acc = tl._unwrap_if_constexpr(max_num_imprecise_acc)
+    acc = tl._unwrap_if_constexpr(acc)
+
     assert lhs.type.is_block() and rhs.type.is_block()
 
     if lhs.dtype.is_fp8() and rhs.dtype.is_fp8():
@@ -1577,12 +1592,15 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optiona
     lhs_rank = len(lhs.shape)
     rhs_rank = len(rhs.shape)
     assert lhs_rank == rhs_rank == 2 or lhs_rank == rhs_rank == 3, f"Both inputs must be either 2D or 3D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
-    assert lhs.shape[-1].value == rhs.shape[
-        -2].value, f"First input shape ({lhs.shape}) and second input shape {rhs.shape} are not compatible for matmul (second index of first shape ({lhs.shape[-1].value}) must be equal to first index of second shape ({rhs.shape[-2].value})"
+
+    assert tl._unwrap_if_constexpr(lhs.shape[-1]) == tl._unwrap_if_constexpr(
+        rhs.shape[-2]
+    ), f"First input shape ({lhs.shape}) and second input shape {rhs.shape} are not compatible for matmul (second index of first shape ({lhs.shape[-1].value}) must be equal to first index of second shape ({rhs.shape[-2].value})"
+
     assert builder.codegen_fns.get("min_dot_size") is not None, "target doesn't provide lower shape bounds for dot."
     min_dot_size = builder.codegen_fns["min_dot_size"](lhs.type, rhs.type)
-    assert lhs.shape[-2].value >= min_dot_size[0] and lhs.shape[-1].value >= min_dot_size[2] \
-        and rhs.shape[-1].value >= min_dot_size[1], \
+    assert tl._unwrap_if_constexpr(lhs.shape[-2]) >= min_dot_size[0] and tl._unwrap_if_constexpr(lhs.shape[-1]) >= min_dot_size[2] \
+        and tl._unwrap_if_constexpr(rhs.shape[-1]) >= min_dot_size[1], \
             f"Input shapes should have M >= {min_dot_size[0]}, N >= {min_dot_size[1]} and K >= {min_dot_size[2]}"
     if lhs.type.scalar.is_int():
         assert lhs.type.scalar == tl.int8, "only int8 supported!"
@@ -1603,6 +1621,7 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optiona
     K = lhs.type.shape[-1]
     B = lhs.type.shape[0] if lhs_rank == 3 else None
     ret_ty = tl.block_type(ret_scalar_ty, [B, M, N] if B else [M, N])
+
     if acc is None:
         acc_handle = builder.create_splat(ret_ty.to_ir(builder), _0)
     else:
@@ -1618,9 +1637,21 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optiona
     else:
         if lhs.dtype.is_fp8() and rhs.dtype.is_fp8() and max_num_imprecise_acc > K:
             raise ValueError(f"max_num_imprecise_acc ({max_num_imprecise_acc}) must be <= K ({K})")
+    return (lhs, rhs, acc_handle, input_precision, max_num_imprecise_acc, ret_ty)
 
-    return tl.tensor(builder.create_dot(lhs.handle, rhs.handle, acc_handle, input_precision, max_num_imprecise_acc),
-                     ret_ty)
+
+def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optional[str], allow_tf32, max_num_imprecise_acc: int,
+        out_dtype: tl.dtype, builder: ir.builder) -> tl.tensor:
+    (lhs, rhs, acc_handle, input_precision, max_num_imprecise_acc,
+     ret_ty) = dot_precheck(lhs, rhs, acc, input_precision, allow_tf32, max_num_imprecise_acc, out_dtype, builder)
+
+    return tl.tensor(builder.create_dot(
+        lhs.handle,
+        rhs.handle,
+        acc_handle,
+        input_precision,
+        max_num_imprecise_acc,
+    ), ret_ty)
 
 
 def _str_to_fp_type(float_format: str):

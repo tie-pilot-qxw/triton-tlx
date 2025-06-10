@@ -5,6 +5,7 @@ from abc import abstractmethod
 
 
 class layout_encoding:
+
     def __init__(self):
         pass
 
@@ -13,6 +14,7 @@ class layout_encoding:
 
 
 class shared_layout_encoding(layout_encoding):
+
     def __init__(self):
         super().__init__()
         pass
@@ -28,6 +30,7 @@ class shared_layout_encoding(layout_encoding):
 
 
 class swizzled_shared_layout_encoding(shared_layout_encoding):
+
     def __init__(self, vectorSize, perPhase, maxPhase, order, numCTAs, numCTAsPerCGA, numCTASplit, numCTAOrder):
         super().__init__()
         self.vectorSize = vectorSize
@@ -42,6 +45,7 @@ class swizzled_shared_layout_encoding(shared_layout_encoding):
     """
     Make a default non-swizzled shared layout encoding.
     """
+
     @classmethod
     def make_default(cls, rank):
         return cls(
@@ -72,6 +76,7 @@ class swizzled_shared_layout_encoding(shared_layout_encoding):
 
 
 class tensor_memory_layout_encoding(shared_layout_encoding):
+
     def __init__(self, blockM, blockN, unpacked, CTASplitM, CTASplitN):
         super().__init__()
         self.blockM = blockM
@@ -83,6 +88,7 @@ class tensor_memory_layout_encoding(shared_layout_encoding):
     """
     Make a default tensor memory layout encoding.
     """
+
     @classmethod
     def make_default(cls, shape):
         return cls(
@@ -93,9 +99,18 @@ class tensor_memory_layout_encoding(shared_layout_encoding):
             CTASplitN=1,
         )
 
-    def build(self, builder):
-        pass
 
+class nv_mma_shared_layout_encoding(shared_layout_encoding):
+
+    def __init__(self, shape, order, elemType, numCTAsPerCGA, numCTASplit, numCTAOrder, fp4Padded):
+        super().__init__()
+        self.shape = shape
+        self.order = order
+        self.elemType = elemType
+        self.numCTAsPerCGA = numCTAsPerCGA
+        self.numCTASplit = numCTASplit
+        self.numCTAOrder = numCTAOrder
+        self.fp4Padded = fp4Padded
 
 
 class storage_kind(enum.Enum):
@@ -155,6 +170,7 @@ class mbarriers(buffered_tensor):
     """
     Define mbarrier type derived from buffered_tensor to support barrier specific operations/validations
     """
+
     def __init__(self, handle):
         # Temporarily use 1, as the shape must be a power of 2.
         # TODO: use the actual barrier count to compute shape for precise boundary checks.
@@ -167,6 +183,7 @@ class async_token(tl.base_value):
     """
     Defines a type of value used to track and synchronize asynchronous operations.
     """
+
     def __init__(self, handle):
         self.handle = handle
 
