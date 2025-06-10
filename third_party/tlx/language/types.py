@@ -22,11 +22,10 @@ class shared_layout_encoding(layout_encoding):
     """
     Create a new layout object that is a permutation of the current layout.
     """
+
     @abstractmethod
     def make_permute(self, dims) -> Self:
-        raise NotImplementedError(
-            f"{self.__class__.__name__}.make_permute() must be overridden in subclasses"
-        )
+        raise NotImplementedError(f"{self.__class__.__name__}.make_permute() must be overridden in subclasses")
 
 
 class swizzled_shared_layout_encoding(shared_layout_encoding):
@@ -52,7 +51,7 @@ class swizzled_shared_layout_encoding(shared_layout_encoding):
             vectorSize=1,
             perPhase=1,
             maxPhase=1,
-            order = list(reversed(range(rank))), # e.g, [1, 0] as a row-major order
+            order=list(reversed(range(rank))),  # e.g, [1, 0] as a row-major order
             numCTAs=[1] * rank,
             numCTAsPerCGA=[1] * rank,
             numCTASplit=[1] * rank,
@@ -62,17 +61,11 @@ class swizzled_shared_layout_encoding(shared_layout_encoding):
     """
     Create a new layout that is a permutation of the given layout.
     """
+
     def make_permute(self, dims) -> Self:
         permuted_order = tuple(self.order[d] for d in dims)
-        return swizzled_shared_layout_encoding(
-            self.vectorSize,
-            self.perPhase,
-            self.maxPhase,
-            permuted_order,
-            self.numCTAs,
-            self.numCTAsPerCGA,
-            self.numCTASplit,
-            self.numCTAOrder)
+        return swizzled_shared_layout_encoding(self.vectorSize, self.perPhase, self.maxPhase, permuted_order,
+                                               self.numCTAs, self.numCTAsPerCGA, self.numCTASplit, self.numCTAOrder)
 
 
 class tensor_memory_layout_encoding(shared_layout_encoding):
@@ -111,7 +104,6 @@ class nv_mma_shared_layout_encoding(shared_layout_encoding):
         self.numCTASplit = numCTASplit
         self.numCTAOrder = numCTAOrder
         self.fp4Padded = fp4Padded
-
 
 class storage_kind(enum.Enum):
     smem = "smem"
@@ -153,7 +145,6 @@ class buffered_tensor(tl.base_value):
         self.storage = storage
         # Layout encoding
         self.layout = layout
-
 
     def make_permute(self, handle, dims) -> Self:
         permuted_type = tl.block_type(self.type.scalar, [self.shape[d] for d in dims])
