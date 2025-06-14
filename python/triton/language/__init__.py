@@ -29,9 +29,12 @@ from .standard import (
 from .core import (
     PropagateNan,
     TRITON_MAX_TENSOR_NUMEL,
+    _experimental_descriptor_load,
+    _experimental_descriptor_store,
     load_tensor_descriptor,
     store_tensor_descriptor,
     make_tensor_descriptor,
+    _experimental_reinterpret_tensor_descriptor,
     tensor_descriptor,
     tensor_descriptor_type,
     add,
@@ -93,6 +96,7 @@ from .core import (
     permute,
     pi32_t,
     pointer_type,
+    nv_tma_desc_type,
     program_id,
     range,
     reduce,
@@ -133,9 +137,12 @@ from .random import (
 __all__ = [
     "PropagateNan",
     "TRITON_MAX_TENSOR_NUMEL",
+    "_experimental_descriptor_load",
+    "_experimental_descriptor_store",
     "load_tensor_descriptor",
     "store_tensor_descriptor",
     "make_tensor_descriptor",
+    "_experimental_reinterpret_tensor_descriptor",
     "tensor_descriptor",
     "abs",
     "add",
@@ -223,6 +230,7 @@ __all__ = [
     "philox_impl",
     "pi32_t",
     "pointer_type",
+    "nv_tma_desc_type",
     "program_id",
     "rand",
     "rand4x",
@@ -296,6 +304,9 @@ def str_to_ty(name):
         stride_type = tuple_type(([int64] * ndim))
         block = block_type(dtype, block_shape)
         return tensor_descriptor_type(block, shape_type, stride_type)
+
+    if name == "nvTmaDesc":
+        return nv_tma_desc_type()
 
     if name == "constexpr":
         return constexpr

@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Type, Union, Iterable, 
 from .. import knobs, language
 from .._C.libtriton import ir
 from ..language import constexpr, semantic, str_to_ty, tensor
-from ..language.core import _unwrap_if_constexpr, base_value, base_type
+from ..language.core import _unwrap_if_constexpr, nv_tma_desc_type, base_value, base_type
 from ..runtime.jit import get_jit_fn_file_line
 # ideally we wouldn't need any runtime component
 from ..runtime import JITFunction
@@ -251,6 +251,10 @@ class ASTFunction:
         vals = make_template(self.arg_types)
         is_val = lambda path, _: path not in self.constants and _ is not None
         val_paths = list(find_paths_if(self.arg_types, is_val))
+        for i, path in enumerate(val_paths):
+            ty = get_iterable_path(self.arg_types, path)
+            if isinstance(ty, nv_tma_desc_type):
+                fn.set_arg_attr(i, "tt.nv_tma_desc", 1)
         # > add IR values to the template
         cursor = 0
         handles = [fn.args(i) for i in range(fn.get_num_args())]
