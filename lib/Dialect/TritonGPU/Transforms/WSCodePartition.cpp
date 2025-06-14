@@ -477,6 +477,7 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
   }
 
   unsigned idx = 1;
+  SmallVector<int32_t> estRegUsage;
   for (Region *region : wsOp.getPartitionRegions()) {
     AsyncTaskId asyncTaskId = nTaskIds[idx];
     OpBuilderWithAsyncTaskIds taskBuilder(context);
@@ -491,7 +492,14 @@ DenseMap<AsyncTaskId, scf::IfOp> SpecializeRegion(triton::FuncOp funcOp,
       SpecializeOp(op, mapping, taskBuilder, asyncTaskId);
     }
     taskBuilder.create<WarpReturnOp>(loc);
+    auto regAlloc = scanRegUsage(partitionBlock, asyncTaskId, regDecProducer,
+                                 regIncConsumer);
+    estRegUsage.push_back(regAlloc.first);
   }
+
+  // We don't have requested registers for the default region.
+  wsOp.setRequestedRegisters(estRegUsage);
+
   // The capture set is the same for every partition region, so now find the
   // captures and thread them in to the regions.
   SetVector<Value> captures;
