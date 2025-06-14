@@ -342,6 +342,7 @@ void init_triton_ir(py::module &&m) {
 
   py::enum_<DescriptorReduceKind>(m, "DESCRIPTOR_REDUCE_KIND",
                                   py::module_local())
+      .value("NONE", DescriptorReduceKind::NONE)
       .value("ADD", DescriptorReduceKind::ADD)
       .value("AND", DescriptorReduceKind::AND)
       .value("OR", DescriptorReduceKind::OR)
@@ -1508,8 +1509,10 @@ void init_triton_ir(py::module &&m) {
            })
       .def("create_descriptor_store",
            [](TritonOpBuilder &self, Value desc, Value value,
-              std::vector<Value> &indices) -> void {
-             self.create<DescriptorStoreOp>(desc, value, indices);
+              std::vector<Value> &indices,
+              DescriptorReduceKind descriptorReduceKind) -> void {
+             self.create<DescriptorStoreOp>(desc, value, indices,
+                                            descriptorReduceKind);
            })
       .def("create_descriptor_reduce",
            [](TritonOpBuilder &self, DescriptorReduceKind kind, Value desc,

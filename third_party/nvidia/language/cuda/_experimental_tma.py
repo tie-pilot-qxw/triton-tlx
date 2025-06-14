@@ -10,16 +10,30 @@ __all__ = [
     "experimental_tensormap_fenceproxy_acquire",
 ]
 
-
+# https://docs.nvidia.com/cuda/parallel-thread-execution/#tensormap-new-val-validity
 def _determine_elem_type(element_ty: core.dtype):
     if element_ty.primitive_bitwidth == 8:
         return 0
-    elif element_ty.primitive_bitwidth == 16:
+    elif element_ty.is_uint16():
         return 1
-    elif element_ty.primitive_bitwidth == 32:
+    elif element_ty.is_uint32():
         return 2
+    elif element_ty.is_int32():
+        return 3
+    elif element_ty.is_uint64():
+        return 4
+    elif element_ty.is_int64():
+        return 5
+    elif element_ty.is_fp16():
+        return 6
+    elif element_ty.is_fp32():
+        return 7
+    elif element_ty.is_fp64():
+        return 9
+    elif element_ty.is_bf16():
+        return 10
     else:
-        raise ValueError("element_ty must be a primitive of size 1, 2, or 4 bytes but got")
+        raise ValueError("element_ty is only supported for above types")
 
 
 @core.builtin

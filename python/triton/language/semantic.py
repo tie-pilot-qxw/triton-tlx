@@ -1171,10 +1171,25 @@ def validate_store_like(desc: tl.tensor_descriptor_base, value: tl.tensor, offse
     assert value.shape == desc.block_shape
 
 
-def descriptor_store(desc: tl.tensor_descriptor_base, value: tl.tensor, offsets, builder: ir.builder) -> tl.tensor:
-    validate_store_like(desc, value, offsets)
-    offsets = _convert_to_ir_values(builder, offsets, require_i64=False)
-    return tl.tensor(builder.create_descriptor_store(desc.handle, value.handle, offsets), tl.void)
+def descriptor_store(desc: tl.tensor_descriptor_base, value: tl.tensor, offsets, store_reduce : str, builder: ir.builder) -> tl.tensor:
+    if store_reduce == "":
+        validate_store_like(desc, value, offsets)
+        offsets = _convert_to_ir_values(builder, offsets, require_i64=False)
+        return tl.tensor(builder.create_descriptor_store(desc.handle, value.handle, offsets, ir.DESCRIPTOR_REDUCE_KIND.NONE), tl.void)
+    elif store_reduce == "add":
+        return descriptor_atomic_add(desc, value, offsets, builder)
+    elif store_reduce == "min":
+        return descriptor_atomic_min(desc, value, offsets, builder)
+    elif store_reduce == "max":
+        return descriptor_atomic_max(desc, value, offsets, builder)
+    elif store_reduce == "and":
+        return descriptor_atomic_and(desc, value, offsets, builder)
+    elif store_reduce == "or":
+        return descriptor_atomic_or(desc, value, offsets, builder)
+    elif store_reduce == "xor":
+        return descriptor_atomic_xor(desc, value, offsets, builder)
+    else:
+        raise ValueError("Unsupported reduction kind")
 
 
 def descriptor_atomic_add(desc: tl.tensor_descriptor_base, value: tl.tensor, offsets, builder: ir.builder) -> tl.tensor:

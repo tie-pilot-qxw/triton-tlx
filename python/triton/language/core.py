@@ -1381,14 +1381,14 @@ class tensor_descriptor_base(base_value):
         return semantic.descriptor_load(self, offsets, "", "", _builder)
 
     @builtin
-    def store(self, offsets: Sequence[constexpr | tensor], value: tensor, _builder=None) -> tensor:
+    def store(self, offsets: Sequence[constexpr | tensor], value: tensor, store_reduce="", _builder=None) -> tensor:
         """Store a block from the descriptor starting at the given element offsets.
 
         Values outside of the tensor bounds will be ignored.
 
         :note: Offset must be a multiple of 16-bytes
         """
-        return semantic.descriptor_store(self, value, offsets, _builder)
+        return semantic.descriptor_store(self, value, offsets, store_reduce, _builder)
 
     @builtin
     def atomic_add(self, offsets: Sequence[constexpr | tensor], value: tensor, _builder=None) -> tensor:
@@ -2029,15 +2029,16 @@ def _experimental_descriptor_load(desc_pointer, offsets, shape, dtype, _builder=
 
 
 @builtin
-def _experimental_descriptor_store(desc_pointer, value, offsets, _builder=None):
+def _experimental_descriptor_store(desc_pointer, value, offsets, store_reduce="", _builder=None):
     """
     Experimental feature to access TMA descriptors stores. This is an escape hatch to easily exercise TTGIR operations.
     This will be removed in the future and shouldn't be used in production code.
 
     This stores a tensor of data based on the descriptor and offsets.
     """
+    store_reduce = _constexpr_to_value(store_reduce)
     desc = _experimental_reinterpret_tensor_descriptor(desc_pointer, value.shape, value.dtype, _builder=_builder)
-    return desc.store(offsets, value, _builder=_builder)
+    return desc.store(offsets, value, store_reduce=store_reduce, _builder=_builder)
 
 
 @builtin

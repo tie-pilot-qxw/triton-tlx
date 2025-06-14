@@ -7,7 +7,6 @@ from triton._internal_testing import (
     numpy_random,
     requires_tma,
     supports_tma,
-    tma_dtypes,
     tma_skip_msg,
     to_triton,
     unwrap_tensor,
@@ -15,6 +14,8 @@ from triton._internal_testing import (
 from triton.tools.experimental_descriptor import (
     create_1d_tma_descriptor,
     create_2d_tma_descriptor,
+    create_1d_tma_descriptor_type,
+    create_2d_tma_descriptor_type,
 )
 
 
@@ -34,6 +35,20 @@ def create_tma_desc_gmem_ptr(ptr, dims, block_dims, element_size):
             cpu_desc.data_ptr(),
         )
     return cpu_desc.cuda()
+
+
+tma_dtypes = [
+    "uint8",
+    "uint16",
+    "uint32",
+    "int32",
+    "uint64",
+    "int64",
+    "float16",
+    "float32",
+    "float64",
+    "bfloat16",
+]
 
 
 @pytest.mark.parametrize("byval_tma", [True, False])
@@ -279,3 +294,294 @@ def test_device_tensormap1d(dtype_str):
     # Check results are correct
     torch.testing.assert_close(unwrap_tensor(inp), unwrap_tensor(out))
     torch.testing.assert_close(unwrap_tensor(inp), unwrap_tensor(inp_copy))
+
+####################################################################################################
+# TMA Reduce
+####################################################################################################
+
+
+def map_dtype_to_triton(dtype: torch.dtype) -> int:
+    """
+    Maps torch dtype to triton dtype.
+    Args:
+        dtype (torch.dtype): input dtype.
+    Returns:
+        tl.dtype: triton dtype.
+    """
+    if dtype == torch.float16:
+        return 0
+    elif dtype == torch.bfloat16:
+        return 1
+    elif dtype == torch.float32:
+        return 2
+    else:
+        raise ValueError(f"Unsupported dtype {dtype}")
+
+
+tma_reduce_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+
+####################################################################################################
+# Vector Reduce-add with on-host TMA
+####################################################################################################
+
+
+@triton.jit
+def vector_add_kernel(
+    x_ptr,  # *Pointer* to first input vector.
+    x_desc,
+    y_ptr,  # *Pointer* to second input vector.
+    y_desc,
+    output_desc,
+    BLOCK_SIZE: tl.constexpr,  # Number of elements each program should process.
+):
+    pid = tl.program_id(axis=0)  # We use a 1D launch grid so axis is 0.
+    block_start = pid * BLOCK_SIZE
+    # Load x through TMA.
+    x = tl._experimental_descriptor_load(
+        x_desc, [block_start], [BLOCK_SIZE], x_ptr.dtype.element_ty
+    )
+    # Store x to through TMA.
+    tl._experimental_descriptor_store(output_desc, x, [block_start])
+    # Load y through TMA.
+    y = tl._experimental_descriptor_load(
+        y_desc, [block_start], [BLOCK_SIZE], y_ptr.dtype.element_ty
+    )
+    tl.debug_barrier()
+    # Store y to through TMA reduce add.
+    tl._experimental_descriptor_store(output_desc, y, [block_start], store_reduce="add")
+
+
+@requires_tma
+@pytest.mark.parametrize("dtype", tma_reduce_dtypes)
+def test_vector_add_host_tma_reduce(dtype):
+    if torch.version.cuda < "12.4":
+        pytest.skip("Test requires CUDA 12.4+")
+        return
+    BLOCK_SIZE = 256
+    size = 1024
+    x = torch.rand(size, dtype=dtype, device="cuda")
+    y = torch.rand(size, dtype=dtype, device="cuda")
+    output_triton = torch.empty_like(x)
+    x_desc = create_1d_tma_descriptor_type(
+        x.data_ptr(), size, BLOCK_SIZE, map_dtype_to_triton(x.dtype)
+    )
+    y_desc = create_1d_tma_descriptor_type(
+        y.data_ptr(), size, BLOCK_SIZE, map_dtype_to_triton(y.dtype)
+    )
+    output_desc = create_1d_tma_descriptor_type(
+        output_triton.data_ptr(),
+        size,
+        BLOCK_SIZE,
+        map_dtype_to_triton(output_triton.dtype),
+    )
+    n_elements = output_triton.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    vector_add_kernel[grid](x, x_desc, y, y_desc, output_desc, BLOCK_SIZE=BLOCK_SIZE)
+    # Check results are correct
+    output_torch = x + y
+    torch.testing.assert_close(output_triton, output_torch)
+
+
+####################################################################################################
+# Tile Reduce-add with on-host TMA
+####################################################################################################
+
+
+@triton.jit
+def tile_add_kernel(
+    x_ptr,
+    x_desc,
+    y_ptr,
+    y_desc,
+    output_desc,
+    M,
+    N,
+    BLOCK_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+):
+    BLOCK_SIZE_M: tl.constexpr = BLOCK_SIZE
+    BLOCK_SIZE_N: tl.constexpr = BLOCK_SIZE
+    GROUP_SIZE_M: tl.constexpr = GROUP_SIZE
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    offs_m = pid_m * BLOCK_SIZE_M
+    offs_n = pid_n * BLOCK_SIZE_N
+
+    # Load x through TMA.
+    x = tl._experimental_descriptor_load(
+        x_desc, [offs_m, offs_n], [BLOCK_SIZE, BLOCK_SIZE], x_ptr.dtype.element_ty
+    )
+    # Store x to through TMA.
+    tl._experimental_descriptor_store(output_desc, x, [offs_m, offs_n])
+    # Load y through TMA.
+    y = tl._experimental_descriptor_load(
+        y_desc, [offs_m, offs_n], [BLOCK_SIZE, BLOCK_SIZE], y_ptr.dtype.element_ty
+    )
+    tl.debug_barrier()
+    # Store y to through TMA reduce add.
+    tl._experimental_descriptor_store(
+        output_desc, y, [offs_m, offs_n], store_reduce="add"
+    )
+
+
+@requires_tma
+@pytest.mark.parametrize("dtype", tma_reduce_dtypes)
+def test_tile_add_host_tma_reduce(dtype):
+    BLOCK_SIZE = 128
+    size = 512
+    x = torch.rand((size, size), dtype=dtype, device="cuda")
+    y = torch.rand((size, size), dtype=dtype, device="cuda")
+    M, N = x.shape
+    x_desc = create_2d_tma_descriptor_type(
+        x.data_ptr(), M, N, BLOCK_SIZE, BLOCK_SIZE, map_dtype_to_triton(x.dtype)
+    )
+    y_desc = create_2d_tma_descriptor_type(
+        y.data_ptr(), M, N, BLOCK_SIZE, BLOCK_SIZE, map_dtype_to_triton(y.dtype)
+    )
+    output_triton = torch.empty((M, N), device=x.device, dtype=dtype)
+    output_desc = triton.tools.experimental_descriptor.create_2d_tma_descriptor_type(
+        output_triton.data_ptr(),
+        M,
+        N,
+        BLOCK_SIZE,
+        BLOCK_SIZE,
+        map_dtype_to_triton(x.dtype),
+    )
+
+    grid = lambda meta: (
+        triton.cdiv(M, meta["BLOCK_SIZE"]) * triton.cdiv(N, meta["BLOCK_SIZE"]),
+    )
+    tile_add_kernel[grid](
+        x,
+        x_desc,
+        y,
+        y_desc,
+        output_desc,
+        M,
+        N,
+        BLOCK_SIZE=BLOCK_SIZE,
+        GROUP_SIZE=8,
+    )
+    # Check results are correct
+    output_torch = x + y
+    torch.testing.assert_close(output_triton, output_torch)
+
+
+####################################################################################################
+# Tile Reduce-add with on-device TMA
+####################################################################################################
+
+
+@triton.jit
+def add_kernel_device_tma_reduce(
+    workspace_ptr,
+    x_ptr,
+    y_ptr,
+    output_ptr,
+    M,
+    N,
+    BLOCK_SIZE: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+):
+    BLOCK_SIZE_M: tl.constexpr = BLOCK_SIZE
+    BLOCK_SIZE_N: tl.constexpr = BLOCK_SIZE
+    GROUP_SIZE_M: tl.constexpr = GROUP_SIZE
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
+
+    offs_m = pid_m * BLOCK_SIZE_M
+    offs_n = pid_n * BLOCK_SIZE_N
+
+    TMA_SIZE: tl.constexpr = 128
+    workspace_base = workspace_ptr + pid * 3 * TMA_SIZE
+    x_desc_ptr = workspace_base
+    y_desc_ptr = workspace_base + TMA_SIZE
+    output_desc_ptr = workspace_base + 2 * TMA_SIZE
+
+    tl.extra.cuda.experimental_device_tensormap_create2d(
+        desc_ptr=x_desc_ptr,
+        global_address=x_ptr,
+        load_size=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+        global_size=[M, N],
+        element_ty=x_ptr.dtype.element_ty,
+    )
+    tl.extra.cuda.experimental_device_tensormap_create2d(
+        desc_ptr=y_desc_ptr,
+        global_address=y_ptr,
+        load_size=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+        global_size=[M, N],
+        element_ty=y_ptr.dtype.element_ty,
+    )
+    tl.extra.cuda.experimental_device_tensormap_create2d(
+        desc_ptr=output_desc_ptr,
+        global_address=output_ptr,
+        load_size=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+        global_size=[M, N],
+        element_ty=output_ptr.dtype.element_ty,
+    )
+
+    tl.extra.cuda.experimental_tensormap_fenceproxy_acquire(x_desc_ptr)
+    tl.extra.cuda.experimental_tensormap_fenceproxy_acquire(y_desc_ptr)
+    tl.extra.cuda.experimental_tensormap_fenceproxy_acquire(output_desc_ptr)
+
+    # Load x through TMA.
+    x = tl._experimental_descriptor_load(
+        x_desc_ptr, [offs_m, offs_n], [BLOCK_SIZE, BLOCK_SIZE], x_ptr.dtype.element_ty
+    )
+    # Store x to through TMA.
+    tl.debug_barrier()
+    tl._experimental_descriptor_store(output_desc_ptr, x, [offs_m, offs_n])
+    # Load y through TMA.
+    y = tl._experimental_descriptor_load(
+        y_desc_ptr, [offs_m, offs_n], [BLOCK_SIZE, BLOCK_SIZE], y_ptr.dtype.element_ty
+    )
+    # Store y to through TMA reduce add.
+    tl.debug_barrier()
+    tl._experimental_descriptor_store(
+        output_desc_ptr, y, [offs_m, offs_n], store_reduce="add"
+    )
+
+
+@requires_tma
+@pytest.mark.parametrize("dtype", tma_reduce_dtypes)
+def test_tile_add_device_tma_reduce(dtype):
+    BLOCK_SIZE = 128
+    size = 512
+    x = torch.rand((size, size), dtype=dtype, device="cuda")
+    y = torch.rand((size, size), dtype=dtype, device="cuda")
+    M, N = x.shape
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    TMA_SIZE = 128
+    workspace = torch.empty(NUM_SMS * 3 * TMA_SIZE, dtype=torch.uint8, device="cuda")
+    output_triton = torch.zeros((M, N), device=x.device, dtype=dtype)
+    grid = lambda meta: (
+        triton.cdiv(M, meta["BLOCK_SIZE"]) * triton.cdiv(N, meta["BLOCK_SIZE"]),
+    )
+    add_kernel_device_tma_reduce[grid](
+        workspace,
+        x,
+        y,
+        output_triton,
+        M,
+        N,
+        BLOCK_SIZE=BLOCK_SIZE,
+        GROUP_SIZE=8,
+    )
+    # Check results are correct
+    output_torch = x + y
+    torch.testing.assert_close(output_triton, output_torch)
