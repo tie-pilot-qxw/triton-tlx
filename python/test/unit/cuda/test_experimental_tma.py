@@ -21,9 +21,8 @@ from triton.tools.experimental_descriptor import (
 def create_tma_desc_gmem_ptr(ptr, dims, block_dims, element_size):
     cpu_desc = torch.empty(128, device="cpu")
     if len(dims) == 1:
-        triton.runtime.driver.active.utils.fill_1d_tma_descriptor(
-            ptr, dims[0], block_dims[0], element_size, cpu_desc.data_ptr()
-        )
+        triton.runtime.driver.active.utils.fill_1d_tma_descriptor(ptr, dims[0], block_dims[0], element_size,
+                                                                  cpu_desc.data_ptr())
     else:
         triton.runtime.driver.active.utils.fill_2d_tma_descriptor(
             ptr,
@@ -51,9 +50,7 @@ def test_experimetal_descriptor_load(byval_tma):
             tl.extra.cuda.experimental_tensormap_fenceproxy_acquire(desc)
         off_desc = 0
         off = tl.arange(0, SIZE)
-        x = tl._experimental_descriptor_load(
-            desc, [off_desc], [SIZE], Z.dtype.element_ty
-        )
+        x = tl._experimental_descriptor_load(desc, [off_desc], [SIZE], Z.dtype.element_ty)
         tl.store(Z + off, x)
 
     x = torch.randn(SIZE, dtype=torch.float32, device=device)
@@ -62,9 +59,7 @@ def test_experimetal_descriptor_load(byval_tma):
     else:
         desc = create_tma_desc_gmem_ptr(x.data_ptr(), [SIZE], [SIZE], x.element_size())
     z_tri = torch.empty_like(x)
-    compiled_kernel = kernel[(1,)](
-        z_tri, desc, SIZE=SIZE, BYVAL_TMA=byval_tma, num_warps=4
-    )
+    compiled_kernel = kernel[(1, )](z_tri, desc, SIZE=SIZE, BYVAL_TMA=byval_tma, num_warps=4)
     assert torch.equal(x, z_tri)
     if byval_tma:
         assert ".param .align 64 .b8" in compiled_kernel.asm["ptx"]
@@ -98,12 +93,8 @@ def matmul_kernel_tma(
     offs_k = 0
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl._experimental_descriptor_load(
-            a_desc_ptr, [offs_am, offs_k], [BLOCK_SIZE_M, BLOCK_SIZE_K], dtype
-        )
-        b = tl._experimental_descriptor_load(
-            b_desc_ptr, [offs_k, offs_bn], [BLOCK_SIZE_K, BLOCK_SIZE_N], dtype
-        )
+        a = tl._experimental_descriptor_load(a_desc_ptr, [offs_am, offs_k], [BLOCK_SIZE_M, BLOCK_SIZE_K], dtype)
+        b = tl._experimental_descriptor_load(b_desc_ptr, [offs_k, offs_bn], [BLOCK_SIZE_K, BLOCK_SIZE_N], dtype)
         accumulator = tl.dot(a, b, acc=accumulator)
         offs_k += BLOCK_SIZE_K
     accumulator = accumulator.to(dtype)
@@ -127,28 +118,14 @@ def test_experimental_tma_matmul(num_stages, BLOCK_M, BLOCK_N, BLOCK_K, byval_tm
     B = torch.randn((K, N), dtype=torch.float16, device=device)
     C = torch.empty((M, N), dtype=torch.float16, device=device)
     if byval_tma:
-        desc_a = create_2d_tma_descriptor(
-            A.data_ptr(), M, K, BLOCK_M, BLOCK_K, A.element_size()
-        )
-        desc_b = create_2d_tma_descriptor(
-            B.data_ptr(), K, N, BLOCK_K, BLOCK_N, B.element_size()
-        )
-        desc_c = create_2d_tma_descriptor(
-            C.data_ptr(), M, N, BLOCK_M, BLOCK_N, C.element_size()
-        )
+        desc_a = create_2d_tma_descriptor(A.data_ptr(), M, K, BLOCK_M, BLOCK_K, A.element_size())
+        desc_b = create_2d_tma_descriptor(B.data_ptr(), K, N, BLOCK_K, BLOCK_N, B.element_size())
+        desc_c = create_2d_tma_descriptor(C.data_ptr(), M, N, BLOCK_M, BLOCK_N, C.element_size())
     else:
-        desc_a = create_tma_desc_gmem_ptr(
-            A.data_ptr(), [M, K], [BLOCK_M, BLOCK_K], A.element_size()
-        )
-        desc_b = create_tma_desc_gmem_ptr(
-            B.data_ptr(), [K, N], [BLOCK_K, BLOCK_N], B.element_size()
-        )
-        desc_c = create_tma_desc_gmem_ptr(
-            C.data_ptr(), [M, N], [BLOCK_M, BLOCK_N], C.element_size()
-        )
-    kernel = matmul_kernel_tma[
-        (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1, 1)
-    ](
+        desc_a = create_tma_desc_gmem_ptr(A.data_ptr(), [M, K], [BLOCK_M, BLOCK_K], A.element_size())
+        desc_b = create_tma_desc_gmem_ptr(B.data_ptr(), [K, N], [BLOCK_K, BLOCK_N], B.element_size())
+        desc_c = create_tma_desc_gmem_ptr(C.data_ptr(), [M, N], [BLOCK_M, BLOCK_N], C.element_size())
+    kernel = matmul_kernel_tma[(triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), 1, 1)](
         desc_a,
         desc_b,
         desc_c,
@@ -216,9 +193,7 @@ def device_tensormap_kernel2d(
     moffset = pid_m * M_BLOCK
     noffset = pid_n * N_BLOCK
 
-    x = tl._experimental_descriptor_load(
-        in_desc, [moffset, noffset], [M_BLOCK, N_BLOCK], in_ptr.dtype.element_ty
-    )
+    x = tl._experimental_descriptor_load(in_desc, [moffset, noffset], [M_BLOCK, N_BLOCK], in_ptr.dtype.element_ty)
     tl._experimental_descriptor_store(out_desc, x, [moffset, noffset])
 
 
@@ -230,28 +205,16 @@ def test_device_tensormap2d(dtype_str):
 
     shape = (M_BLOCK * M_GRID, M_BLOCK * N_GRID)
     device = "cuda"
-    inp = to_triton(
-        numpy_random(shape, dtype_str=dtype_str), device=device, dst_type=dtype_str
-    )
+    inp = to_triton(numpy_random(shape, dtype_str=dtype_str), device=device, dst_type=dtype_str)
     inp_copy = inp.clone()
-    out = to_triton(
-        numpy_random(shape, dtype_str=dtype_str), device=device, dst_type=dtype_str
-    )
+    out = to_triton(numpy_random(shape, dtype_str=dtype_str), device=device, dst_type=dtype_str)
 
-    in_desc = torch.randint(0, 256, size=(128,), dtype=torch.uint8, device="cuda")
-    out_desc = torch.randint(0, 256, size=(128,), dtype=torch.uint8, device="cuda")
+    in_desc = torch.randint(0, 256, size=(128, ), dtype=torch.uint8, device="cuda")
+    out_desc = torch.randint(0, 256, size=(128, ), dtype=torch.uint8, device="cuda")
     ready_flag = torch.zeros((), dtype=torch.int32, device="cuda")
 
-    device_tensormap_kernel2d[M_GRID, N_GRID](
-        inp,
-        out,
-        in_desc,
-        out_desc,
-        ready_flag,
-        *shape,
-        M_BLOCK=M_BLOCK,
-        N_BLOCK=N_BLOCK
-    )
+    device_tensormap_kernel2d[M_GRID, N_GRID](inp, out, in_desc, out_desc, ready_flag, *shape, M_BLOCK=M_BLOCK,
+                                              N_BLOCK=N_BLOCK)
 
     # Check results are correct
     torch.testing.assert_close(unwrap_tensor(inp), unwrap_tensor(out))
@@ -259,9 +222,7 @@ def test_device_tensormap2d(dtype_str):
 
 
 @triton.jit
-def device_tensormap_kernel1d(
-    in_ptr, out_ptr, in_desc, out_desc, ready_flag, numel, BLOCK: tl.constexpr
-):
+def device_tensormap_kernel1d(in_ptr, out_ptr, in_desc, out_desc, ready_flag, numel, BLOCK: tl.constexpr):
     pid = tl.program_id(axis=0)
 
     if pid == 0:
@@ -291,9 +252,7 @@ def device_tensormap_kernel1d(
 
     offset = pid * BLOCK
 
-    x = tl._experimental_descriptor_load(
-        in_desc, [offset], [BLOCK], in_ptr.dtype.element_ty
-    )
+    x = tl._experimental_descriptor_load(in_desc, [offset], [BLOCK], in_ptr.dtype.element_ty)
     tl._experimental_descriptor_store(out_desc, x, [offset])
 
 
@@ -303,23 +262,19 @@ def test_device_tensormap1d(dtype_str):
     BLOCK = 256
     GRID = 8
 
-    shape = (BLOCK * GRID,)
+    shape = (BLOCK * GRID, )
     device = "cuda"
-    inp = to_triton(
-        numpy_random(shape, dtype_str=dtype_str), device=device, dst_type=dtype_str
-    )
+    inp = to_triton(numpy_random(shape, dtype_str=dtype_str), device=device, dst_type=dtype_str)
     inp_copy = inp.clone()
-    out = to_triton(
-        numpy_random(shape, dtype_str=dtype_str), device=device, dst_type=dtype_str
-    )
+    out = to_triton(numpy_random(shape, dtype_str=dtype_str), device=device, dst_type=dtype_str)
 
-    in_desc = torch.randint(0, 256, size=(128,), dtype=torch.uint8, device="cuda")
-    out_desc = torch.randint(0, 256, size=(128,), dtype=torch.uint8, device="cuda")
+    in_desc = torch.randint(0, 256, size=(128, ), dtype=torch.uint8, device="cuda")
+    out_desc = torch.randint(0, 256, size=(128, ), dtype=torch.uint8, device="cuda")
     ready_flag = torch.zeros((), dtype=torch.int32, device="cuda")
 
-    device_tensormap_kernel1d[1,](
-        inp, out, in_desc, out_desc, ready_flag, *shape, BLOCK=BLOCK
-    )
+    device_tensormap_kernel1d[
+        1,
+    ](inp, out, in_desc, out_desc, ready_flag, *shape, BLOCK=BLOCK)
 
     # Check results are correct
     torch.testing.assert_close(unwrap_tensor(inp), unwrap_tensor(out))
