@@ -71,9 +71,10 @@ While this approach places more responsibility on the user, it reduces the compi
 
    Commits all prior initiated but uncommitted async_load ops an async group. Optionally, each token represents a tracked async load operation.
 
-- `tlx.async_load_wait_group(tokens)`
+- `tlx.async_load_wait_group(pendings, tokens)`
 
-   Wait for completion of prior asynchronous copy operations. Optionally, each token represents a tracked async commit group operation.
+   Wait for completion of prior asynchronous copy operations. The `pendings` argument indicates the number of in-flight operations not completed.
+   Optionally, each token represents a tracked async commit group operation.
 
 
 ### Async tensor core operations
