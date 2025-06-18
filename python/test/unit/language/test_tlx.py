@@ -200,6 +200,51 @@ def test_tmem_alloc_index(BLOCK_SIZE, device):
     assert kerenl_info.asm["ttgir"].count("kernel") == 1
 
 
+@pytest.mark.skipif(
+    not is_cuda() or torch.cuda.get_device_capability()[0] < 10,
+    reason="Requires compute capability >= 10 for NV",
+)
+@pytest.mark.parametrize("BLOCK_SIZE_M, BLOCK_SIZE_N", [(64, 64), (64, 8), (128, 16)])
+def test_tmem_load_store(BLOCK_SIZE_M, BLOCK_SIZE_N, device):
+
+    @triton.jit
+    def tmem_load_store_kernel(
+        x_ptr,
+        stride_m,
+        stride_n,
+        BLOCK_SIZE_M: tl.constexpr,
+        BLOCK_SIZE_N: tl.constexpr,
+    ):
+        offs_m = tl.arange(0, BLOCK_SIZE_M)
+        offs_n = tl.arange(0, BLOCK_SIZE_N)
+        x_ptr_offsets = x_ptr + (offs_m[:, None] * stride_m + offs_n[None, :] * stride_n)
+
+        a = tl.full((BLOCK_SIZE_M, BLOCK_SIZE_N), 1.0, tl.float32)
+
+        buffers = tlx.local_alloc((BLOCK_SIZE_M, BLOCK_SIZE_N), tl.float32, tl.constexpr(1), tlx.storage_kind.tmem)
+        buffer1 = tlx.local_view(buffers, 0)
+        tlx.local_store(buffer1, a, tlx.storage_kind.tmem)
+        b = tlx.local_load(buffer1, tlx.storage_kind.tmem)
+        # b == a == tensor of 1.0
+        tl.store(x_ptr_offsets, b + 2)
+
+    x = torch.rand((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=torch.float32, device=device)  # noqa: F841
+    grid = lambda meta: (1, )  # noqa: F841
+    # TODO: uncomment below once layout propagation is ready
+    # kerenl_info = tmem_load_store_kernel[grid](x, x.stride(0), x.stride(1), BLOCK_SIZE_M, BLOCK_SIZE_N)
+
+    # assert kerenl_info.asm["ttir"].count("ttng.tmem_store") == 1
+    # assert kerenl_info.asm["ttir"].count("ttng.tmem_load") == 1
+
+    # assert kerenl_info.asm["ttgir"].count("kernel") == 1
+    # assert kerenl_info.asm["ttgir"].count("ttng.tmem_alloc") == 1
+    # assert kerenl_info.asm["ttgir"].count("ttng.tmem_store") == 1
+    # assert kerenl_info.asm["ttgir"].count("ttng.tmem_load") == 1
+
+    # ref_out = torch.ones_like(x) + 2
+    # torch.testing.assert_close(x, ref_out)
+
+
 def test_thread_id(device):
 
     @triton.jit
