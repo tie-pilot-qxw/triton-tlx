@@ -1,7 +1,24 @@
 # third_party/tlx/codegen/async.py
 
 import ast
+from typing import List
 import triton.tlx.language as tlx  # Make sure async_task(s) are exposed via tlx.__init__.py
+from contextlib import contextmanager
+
+# TLX allows users to specify the replicate number when definine
+# a non-default partition region. We use a stack to keep track of
+# replica_id of the region being compiled.
+region_replica_id_stack: List[int] = []
+
+
+@contextmanager
+def tlx_enter_sub_region():
+    global region_replica_id_stack
+    replica_id_stack_backup = region_replica_id_stack.copy()
+    try:
+        yield
+    finally:
+        assert region_replica_id_stack == replica_id_stack_backup
 
 
 def _is_async_task(self, node) -> bool:
@@ -29,41 +46,47 @@ def visit_withAsyncTask(self, node):
     self.visit_compound_statement(node.body)
 
 
+@tlx_enter_sub_region()
 def visit_withAsyncTasks(self, node):
-    from triton.compiler.code_generator import enter_sub_region, _is_list_like, _is_constexpr
+    from triton.compiler.code_generator import (enter_sub_region, _is_list_like, _is_constexpr)
     with enter_sub_region(self) as sr:
-        liveins, ip_block = sr
+        liveins, _ = sr
         ip, last_loc = self._get_insertion_point_and_loc()
         stmts = node.body
         # Ensure that stmts is iterable
         if not _is_list_like(stmts):
             stmts = [stmts]
 
-        # dry visit task body
-        block = self.builder.create_block()
-        self.builder.set_insertion_point_to_start(block)
-        # Count the number of sub tasks and caculate captures
-        taskNumWarps = []
-        taskNumRegs = []
-        taskReplica = []
+        with tlx_enter_sub_region():  # dry visit async task body
+            block = self.builder.create_block()
+            self.builder.set_insertion_point_to_start(block)
+            # Count the number of sub tasks and caculate captures
+            taskNumWarps = []
+            taskNumRegs = []
+            taskReplica = []
 
-        num_default = 0
-        for stmt in stmts:
-            assert _is_async_task(self, stmt)
-            task = _get_async_task(self, stmt)
-            assert task.is_explict
-            if task.is_default:
-                num_default += 1
-            else:
-                assert task.replicate is not None, "Replicate must be non-None for non-default task"
-                taskReplica.append(task.replicate)
+            global region_replica_id_stack
+            region_replica_id_stack.append(-1)  # dummy placeholder
 
-                # Get used vars to be captured
-                taskNumWarps.extend([task.num_warps] * task.replicate)
-                if task.num_regs:
-                    taskNumRegs.extend([task.num_regs] * task.replicate)
-                with enter_sub_region(self):
-                    self.visit(stmt)
+            num_default = 0
+            for stmt in stmts:
+                assert _is_async_task(self, stmt)
+                task = _get_async_task(self, stmt)
+                assert task.is_explict
+                if task.is_default:
+                    num_default += 1
+                else:
+                    assert task.replicate is not None, "Replicate must be non-None for non-default task"
+                    taskReplica.append(task.replicate)
+
+                    # Get used vars to be captured
+                    taskNumWarps.extend([task.num_warps] * task.replicate)
+                    if task.num_regs:
+                        taskNumRegs.extend([task.num_regs] * task.replicate)
+                    with enter_sub_region(self):
+                        self.visit(stmt)
+
+            region_replica_id_stack.pop()  # revert adding dummy placeholder
 
         assert num_default == 1, "Default task must be one and only one"
         block.erase()
@@ -98,6 +121,8 @@ def visit_withAsyncTasks(self, node):
                 self.builder.create_warp_yield_op()
             else:
                 for i in range(task.replicate):
+                    region_replica_id_stack.append(i)
+
                     task_body = ws_op.get_partition_region(index - 1)
                     index += 1
 
@@ -111,3 +136,4 @@ def visit_withAsyncTasks(self, node):
                         block.replace_use_in_block_with(val.handle, arg)
 
                     self.builder.create_warp_return_op()
+                    region_replica_id_stack.pop()
