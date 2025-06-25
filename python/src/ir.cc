@@ -1412,12 +1412,17 @@ void init_triton_ir(py::module &&m) {
            })
       .def("create_descriptor_load",
            [](TritonOpBuilder &self, Value desc, std::vector<Value> &indices,
-              CacheModifier cacheModifier,
-              EvictionPolicy evictionPolicy) -> Value {
+              CacheModifier cacheModifier, EvictionPolicy evictionPolicy,
+              std::optional<int> latency) -> Value {
              auto descTy = cast<triton::TensorDescType>(desc.getType());
              auto resTy = descTy.getSignlessBlockType();
-             return self.create<DescriptorLoadOp>(
-                 resTy, desc, indices, cacheModifier, evictionPolicy);
+             IntegerAttr latencyAttr = nullptr;
+             if (latency.has_value())
+               latencyAttr =
+                   self.getBuilder().getI32IntegerAttr(latency.value());
+             return self.create<DescriptorLoadOp>(resTy, desc, indices,
+                                                  cacheModifier, evictionPolicy,
+                                                  latencyAttr);
            })
       .def("create_descriptor_gather",
            [](TritonOpBuilder &self, Value desc, Value x_indices, Value y_index,
