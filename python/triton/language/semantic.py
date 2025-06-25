@@ -1085,15 +1085,15 @@ class TritonSemantic(Generic[TensorTy]):
             # Load by a tensor of pointers or a pointer of scalar: `block_type<pointer_type<>>` or `pointer_type<>`
             return self._load_legacy(ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile)
 
-    def descriptor_load(self, desc: tl.tensor_descriptor_base, offsets, cache_modifier: str,
-                        eviction_policy: str) -> TensorTy:
+    def descriptor_load(self, desc: tl.tensor_descriptor_base, offsets, cache_modifier: str, eviction_policy: str,
+                        latency: Optional[int]) -> TensorTy:
         assert isinstance(desc, tl.tensor_descriptor_base)
         ndim = len(desc.block_shape)
         assert len(offsets) == ndim, f"expected {ndim} offsets, but got {len(offsets)}"
 
         offsets = self._convert_to_ir_values(offsets, require_i64=False)
         x = self.builder.create_descriptor_load(desc.handle, offsets, self._str_to_load_cache_modifier(cache_modifier),
-                                                self._str_to_eviction_policy(eviction_policy))
+                                                self._str_to_eviction_policy(eviction_policy), latency)
         return self.tensor(x, desc.block_type)
 
     def validate_store_like(self, desc: tl.tensor_descriptor_base, value: TensorTy, offsets) -> None:
