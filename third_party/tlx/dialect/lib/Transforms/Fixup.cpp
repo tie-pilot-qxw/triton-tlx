@@ -4,9 +4,11 @@
 #include "tlx/dialect/include/IR/Dialect.h"
 #include "tlx/dialect/include/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "llvm/Support/Debug.h"
 
 namespace ttg = mlir::triton::gpu;
+namespace ttng = mlir::triton::nvidia_gpu;
 
 namespace mlir::triton::tlx {
 
@@ -24,16 +26,33 @@ public:
   void runOnOperation() override {
     ModuleOp mod = getOperation();
 
-    // First check if there is any TLX op in the module. If not, do nothing.
+    // First check if there is any TLX related op in the module. If not, do
+    // nothing.
     auto tlxDialectName = TLXDialect::getDialectNamespace();
     WalkResult result = mod.walk([&](Operation *op) {
+      // Ops directly in TLX Dialect
       if (op->getDialect()->getNamespace() == tlxDialectName) {
         return WalkResult::interrupt();
       }
       return WalkResult::advance();
     });
-    if (!result.wasInterrupted()) {
-      // No TLX op found, do nothing.
+    auto hasTLXOps = result.wasInterrupted();
+
+    auto hasExplicitLocalMemAccess =
+        mod.walk([&](Operation *op) {
+             // Ops that should not be in TTIR unless introduced by TLX
+             if (isa<ttg::LocalLoadOp, ttg::LocalStoreOp,
+                     ttng::AsyncTMACopyGlobalToLocalOp,
+                     ttng::AsyncTMACopyLocalToGlobalOp, ttng::TMEMAllocOp,
+                     ttng::TMEMLoadOp, ttng::TMEMStoreOp, ttng::TCGen5MMAOp>(
+                     op)) {
+               return WalkResult::interrupt();
+             }
+             return WalkResult::advance();
+           })
+            .wasInterrupted();
+
+    if (!hasTLXOps && !hasExplicitLocalMemAccess) {
       return;
     }
 
@@ -44,6 +63,10 @@ public:
                  b.getI32IntegerAttr(threadsPerWarp));
     mod->setAttr(ttg::AttrNumCTAsName, b.getI32IntegerAttr(numCTAs));
     mod->setAttr(ttg::AttrTargetName, b.getStringAttr(this->target.getValue()));
+    if (hasTLXOps)
+      mod->setAttr(AttrHasTLXOpsName, b.getBoolAttr(true));
+    if (hasExplicitLocalMemAccess)
+      mod->setAttr(AttrHasExplicitLocalMemAccessName, b.getBoolAttr(true));
   }
 };
 
