@@ -27,12 +27,21 @@ public:
       NVGPUWarpSpecializationPass>::NVGPUWarpSpecializationBase;
 
   void runOnFuncOp(triton::FuncOp funcOp) {
-    SmallVector<scf::ForOp> loops;
-    funcOp->walk([&](scf::ForOp forOp) {
-      if (forOp->hasAttr(mlir::triton::kWarpSpecializeAttrName))
-        loops.push_back(forOp);
+    bool enabled = false;
+    funcOp->walk([&](Operation *op) {
+      if (auto attr = op->getAttrOfType<DenseI32ArrayAttr>("async_task_id"))
+        enabled = true;
     });
-    if (loops.empty())
+    if (!enabled) {
+      SmallVector<scf::ForOp> loops;
+      funcOp->walk([&](scf::ForOp forOp) {
+        if (forOp->hasAttr(mlir::triton::kWarpSpecializeAttrName))
+          loops.push_back(forOp);
+      });
+      if (!loops.empty())
+        enabled = true;
+    }
+    if (!enabled)
       return;
 
     int numWarps = mlir::triton::gpu::lookupNumWarps(funcOp);
@@ -45,7 +54,8 @@ public:
     funcOp->walk([&](scf::IfOp ifOp) {
       if (ifOp.elseBlock()) {
         for (Operation &op : ifOp.elseBlock()->getOperations()) {
-          hasElse = true;
+          if (!isa<scf::YieldOp>(&op))
+            hasElse = true;
         }
       }
     });
@@ -54,16 +64,20 @@ public:
 
     OpBuilder builder(funcOp);
     auto moduleOp = funcOp->getParentOfType<ModuleOp>();
-    unsigned numWarpGroups = 3;
     // FIXME: skip data partitioning with on-host TMA.
+    // FIXME: skip data partitioning for Blackwell.
+    const int ForBlackWell = true;
+    unsigned numWarpGroups = ForBlackWell ? 2 : 3;
     bool success = false;
     for (; numWarpGroups >= 2; numWarpGroups--) {
       // Partition key ops into multiple async tasks.
-      doTaskPartition(funcOp, numWarpGroups);
-      if (dumpIntermediateSteps) {
-        llvm::dbgs()
-            << "// -----// WarpSpec internal IR Dump After: doTaskPartition\n"
-            << moduleOp << "\n\n\n";
+      if (!ForBlackWell) {
+        doTaskPartition(funcOp, numWarpGroups);
+        if (dumpIntermediateSteps) {
+          llvm::dbgs()
+              << "// -----// WarpSpec internal IR Dump After: doTaskPartition\n"
+              << moduleOp << "\n\n\n";
+        }
       }
       // Propagate taskId.
       int retCode = doTaskIdPropagate(funcOp);
@@ -76,16 +90,18 @@ public:
       }
 
       // Partition ops into parallel sub ops.
-      if (doDataPartition(funcOp, numWarpGroups - 1)) {
-        if (dumpIntermediateSteps) {
-          llvm::dbgs()
-              << "// -----// WarpSpec internal IR Dump After: doDataPartition\n"
-              << moduleOp << "\n\n\n";
+      if (!ForBlackWell) {
+        if (doDataPartition(funcOp, numWarpGroups - 1)) {
+          if (dumpIntermediateSteps) {
+            llvm::dbgs() << "// -----// WarpSpec internal IR Dump After: "
+                            "doDataPartition\n"
+                         << moduleOp << "\n\n\n";
+          }
+          success = true;
+          break;
         }
-        success = true;
-        break;
+        // Clear async_task.
       }
-      // Clear async_task.
     }
     if (!success)
       signalPassFailure();

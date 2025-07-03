@@ -553,6 +553,9 @@ public:
         loc, tokType, a, b, acc, acc.getToken(), /*useD=*/vTrue,
         /*pred=*/vTrue);
     mma.setTwoCtas(useTwoCTAs);
+    // update asyncTaskId
+    if (dotOp->getAttr("async_task_id"))
+      mma->setAttr("async_task_id", dotOp->getAttr("async_task_id"));
 
     auto ld = rewriter.create<triton::nvidia_gpu::TMEMLoadOp>(
         loc, newAccType, tokType, acc, /*dep=*/mma.getToken());
