@@ -166,6 +166,22 @@ static void createChannel(Operation *producerOp, Operation *op,
   }
 }
 
+// Can be one end of the channel.
+static bool isChannelAnchorOp(Operation *op) {
+  if (isa<tt::LoadOp, tt::DescriptorLoadOp>(op) ||
+      isa<mlir::triton::DotOpInterface>(op))
+    return true;
+  // Any computation tensor op?
+  if (dyn_cast<arith::ConstantOp>(op) || dyn_cast<scf::IfOp>(op) ||
+      dyn_cast<scf::ForOp>(op))
+    return false;
+  for (auto result : op->getResults()) {
+    if (auto tensorType = dyn_cast<RankedTensorType>(result.getType()))
+      return true;
+  }
+  return false;
+}
+
 // Loads will be in producer warp groups. For now, we only allow a single
 // warp group/task for a producer. For each LoadOp, create a channel from it
 // to any direct user which belongs to a different taskId.
@@ -175,8 +191,7 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
   funcOp.walk([&](Operation *op) {
     // FIXME: It is possible that a local_alloc can start a channel, when a
     // gemm's operand is in smem and comes from local_alloc.
-    if (isa<tt::LoadOp, tt::DescriptorLoadOp>(op) ||
-        isa<mlir::triton::DotOpInterface>(op)) {
+    if (isChannelAnchorOp(op)) {
       auto producerTaskIds = getAsyncTaskIds(op);
       if (producerTaskIds.empty() || producerTaskIds.size() > 1) {
         LLVM_DEBUG({
@@ -208,6 +223,7 @@ void collectAsyncChannels(SmallVector<std::unique_ptr<Channel>> &channels,
           createChannel(producerOp, op, dom, channels, true /*opndA*/,
                         producerNumBuffers);
       } else {
+        // If the consumer is in a different task, create a channel.
         createChannel(producerOp, op, dom, channels, false, producerNumBuffers);
       }
     }
