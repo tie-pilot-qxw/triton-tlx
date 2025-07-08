@@ -312,17 +312,17 @@ void init_triton_tlx_ir(py::module &&m) {
            [](TritonOpBuilder &self, Value desc, std::vector<Value> &coord,
               Value mbarrier, Value result, CacheModifier cacheModifier,
               EvictionPolicy evictionPolicy, bool isVolatile) -> void {
-             Value tmaPtr = self.create<ttng::TensorDescToTMAPtrOp>(desc);
+             //  Value tmaPtr = self.create<ttng::TensorDescToTMAPtrOp>(desc);
              Value pred = self.create<arith::ConstantIntOp>(1, 1);
              self.create<ttng::AsyncTMACopyGlobalToLocalOp>(
-                 tmaPtr, coord, mbarrier, result, pred, cacheModifier,
+                 desc, coord, mbarrier, result, pred, cacheModifier,
                  evictionPolicy, isVolatile);
            })
       .def("create_async_TMA_store",
            [](TritonOpBuilder &self, Value desc, std::vector<Value> &coord,
               Value source) -> void {
-             Value tmaPtr = self.create<ttng::TensorDescToTMAPtrOp>(desc);
-             self.create<ttng::AsyncTMACopyLocalToGlobalOp>(tmaPtr, coord,
+             //  Value tmaPtr = self.create<ttng::TensorDescToTMAPtrOp>(desc);
+             self.create<ttng::AsyncTMACopyLocalToGlobalOp>(desc, coord,
                                                             source);
            });
 }

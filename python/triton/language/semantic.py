@@ -990,7 +990,7 @@ class TritonSemantic(Generic[TensorTy]):
             return sorted(boundary_check)
         return ()
 
-    def _load_block_pointer(ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile):
+    def _load_block_pointer(self, ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile):
         # Load by a block pointer: `pointer_type<block_type<>>`
         # Block pointer can not have `mask` and `other` arguments
         if mask is not None or other is not None:
@@ -1012,7 +1012,7 @@ class TritonSemantic(Generic[TensorTy]):
             self.builder.create_tensor_pointer_load(ptr.handle, boundary_check, padding, cache, eviction, is_volatile), dst_ty)
     
     
-    def _prepare_legacy_load(ptr, mask, other, boundary_check, padding):
+    def _prepare_legacy_load(self, ptr, mask, other, boundary_check, padding):
         # Load by a tensor of pointers or a pointer of scalar: `block_type<pointer_type<>>` or `pointer_type<>`
         if not ptr.type.scalar.is_ptr():
             raise ValueError(f"Unsupported ptr type {ptr.type.__repr__()} in `tl.load`")
@@ -1035,9 +1035,9 @@ class TritonSemantic(Generic[TensorTy]):
         # Make `mask` and `other` into the same shape as `ptr`
         if ptr.type.is_block():
             if mask is not None:
-                mask = broadcast_impl_shape(mask, ptr.type.get_block_shapes(), self.builder)
+                mask = self.broadcast_impl_shape(mask, ptr.type.get_block_shapes())
             if other is not None:
-                other = broadcast_impl_shape(other, ptr.type.get_block_shapes(), self.builder)
+                other = self.broadcast_impl_shape(other, ptr.type.get_block_shapes())
     
         # Get `pointer_type<elt_ty>` and `elt_ty`
         ptr_ty = ptr.type.scalar
@@ -1063,9 +1063,9 @@ class TritonSemantic(Generic[TensorTy]):
             dst_ty = elt_ty
         return dst_ty, mask, other
     
-    def _load_legacy(ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile):
+    def _load_legacy(self, ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile):
         # pre-check
-        dst_ty, mask, other = _prepare_legacy_load(ptr, mask, other, boundary_check, padding)
+        dst_ty, mask, other = self._prepare_legacy_load(ptr, mask, other, boundary_check, padding)
         # Build IR
         if mask is None:
             ret = tl.tensor(self.builder.create_load(ptr.handle, cache, eviction, is_volatile), dst_ty)
@@ -1475,7 +1475,7 @@ class TritonSemantic(Generic[TensorTy]):
       #   assert lhs.type.is_block() and rhs.type.is_block()
 
 
-    def dot_precheck(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optional[str], allow_tf32,
+    def dot_precheck(self, lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optional[str], allow_tf32,
                      max_num_imprecise_acc: int, out_dtype: tl.dtype) -> Tuple[Any]:
         input_precision = tl._unwrap_if_constexpr(input_precision)
         allow_tf32 = tl._unwrap_if_constexpr(allow_tf32)
@@ -1515,7 +1515,7 @@ class TritonSemantic(Generic[TensorTy]):
         if input_precision is None:
             input_precision = self.builder.options.default_dot_input_precision
     
-        input_precision = _str_to_dot_input_precision(input_precision, self.builder)
+        input_precision = self._str_to_dot_input_precision(input_precision)
     
         lhs_rank = len(lhs.shape)
         rhs_rank = len(rhs.shape)
@@ -1574,7 +1574,7 @@ class TritonSemantic(Generic[TensorTy]):
     def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optional[str], allow_tf32, max_num_imprecise_acc: int,
             out_dtype: tl.dtype) -> tl.tensor:
         (lhs, rhs, acc_handle, input_precision, max_num_imprecise_acc,
-         ret_ty) = dot_precheck(lhs, rhs, acc, input_precision, allow_tf32, max_num_imprecise_acc, out_dtype)
+         ret_ty) = self.dot_precheck(lhs, rhs, acc, input_precision, allow_tf32, max_num_imprecise_acc, out_dtype)
     
         return tl.tensor(self.builder.create_dot(
             lhs.handle,
