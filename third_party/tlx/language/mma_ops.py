@@ -1,5 +1,4 @@
 import triton.language.core as tl
-import triton.language.semantic as semantic
 
 from . import types as tlx
 from .utility import cuda_parse_arch
@@ -44,7 +43,7 @@ def async_dot(
     mBarrier=None,
     input_precision=None,
     out_dtype=tl.float32,
-    _builder=None,
+    _semantic=None,
 ) -> tl.tensor:
     """
     Performs a warp-group matrix multiply-accumulate operation of two blocks and return the matrix product.
@@ -70,18 +69,18 @@ def async_dot(
 
     # Perform dot_precheck shared by tl.dot
     (A, B, acc_handle, input_precision, max_num_imprecise_acc,
-     ret_ty) = semantic.dot_precheck(A, B, acc, input_precision, None, None, out_dtype, _builder)
+     ret_ty) = _semantic.dot_precheck(A, B, acc, input_precision, None, None, out_dtype)
 
     assert A.shape[0] >= 64, "M must be at least 64"
     assert A.shape[1] >= 16, "K must be at least 16"
     assert B.shape[1] >= 32, "N must be at least 32"
 
-    cuda_compute_capability = int(cuda_parse_arch(_builder.options.arch))
+    cuda_compute_capability = int(cuda_parse_arch(_semantic.builder.options.arch))
     version = 5 if cuda_compute_capability >= 100 else 3
 
     # TODO. batched dot is not supported yet
     if isinstance(A, tlx.buffered_tensor) and A.storage == tlx.storage_kind.smem:
-        A_handle = require_nv_mma_shared_layout(A, _builder)
+        A_handle = require_nv_mma_shared_layout(A, _semantic.builder)
     elif isinstance(A, tl.tensor):
         assert cuda_compute_capability < 100, "register operand is not supported on Blackwell"
         A_handle = A.handle
@@ -89,22 +88,22 @@ def async_dot(
         # Registers or TMEM buffer do not need mma shared layout
         A_handle = A.handle
 
-    B_handle = require_nv_mma_shared_layout(B, _builder)
+    B_handle = require_nv_mma_shared_layout(B, _semantic.builder)
 
     if version == 5:
         assert isinstance(A, tlx.buffered_tensor), "input must be a buffered tensor"
-        output = _builder.create_tcgen5_dot(A_handle, B_handle, acc.handle, mBarrier.handle if mBarrier else None)
+        output = _semantic.builder.create_tcgen5_dot(A_handle, B_handle, acc.handle, mBarrier.handle if mBarrier else None)
         return tlx.async_token(output)
     else:
-        mma_layout = _builder.make_nv_mma_encoding_attr(A_handle, acc_handle, version, 0,
-                                                           _builder.options.num_warps)
-        acc = _builder.create_require_layout(acc_handle, mma_layout)
+        mma_layout = _semantic.builder.make_nv_mma_encoding_attr(A_handle, acc_handle, version, 0,
+                                                           _semantic.builder.options.num_warps)
+        acc = _semantic.builder.create_require_layout(acc_handle, mma_layout)
         if isinstance(A, tl.tensor):
-            A_handle = require_dot_operand_layout(A, 0, mma_layout, _builder)
-        output = _builder.create_warp_group_dot(A_handle, B_handle, acc, input_precision,
+            A_handle = require_dot_operand_layout(A, 0, mma_layout, _semantic.builder)
+        output = _semantic.builder.create_warp_group_dot(A_handle, B_handle, acc, input_precision,
          max_num_imprecise_acc, True)
         # Release the mma layout for the output to conform to what the user expects
-        output = _builder.create_release_layout(output)
+        output = _semantic.builder.create_release_layout(output)
         return tl.tensor(output, ret_ty)
 
 
@@ -112,7 +111,7 @@ def async_dot(
 def async_dot_wait(
     pendings: tl.constexpr,
     inp: tl.tensor,
-    _builder=None,
+    _semantic=None,
 ) -> tl.tensor:
     """
     Wait for completion of prior asynchronous dot operations.
@@ -120,4 +119,4 @@ def async_dot_wait(
     waiting on.
     """
     pendings = tl._unwrap_if_constexpr(pendings)
-    return tl.tensor(_builder.create_warp_group_dot_wait([inp.handle], pendings)[0], inp.type)
+    return tl.tensor(_semantic.builder.create_warp_group_dot_wait([inp.handle], pendings)[0], inp.type)

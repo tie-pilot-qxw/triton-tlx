@@ -179,6 +179,8 @@ class buffered_tensors(tl.base_value):
         self.num = num
         self.handle = base_tensor.handle
 
+    def _flatten_ir(self, handles) -> None:
+        handles.append(self.handle)
 
 class mbarrier(buffered_tensor):
     """
@@ -201,6 +203,8 @@ class mbarriers(tl.base_value):
         self.num = num
         self.handle = base_barrier.handle
 
+    def _flatten_ir(self, handles) -> None:
+        handles.append(self.handle)
 
 class async_token(tl.base_value):
     """

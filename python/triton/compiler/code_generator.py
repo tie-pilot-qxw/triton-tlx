@@ -130,8 +130,9 @@ class enter_sub_region:
 
     def __enter__(self):
         # record lscope & local_defs in the parent scope
-        self.liveins = _clone_scope(self.generator.lscope)
-        self.prev_defs = _clone_scope(self.generator.local_defs)
+        # TODO. TLX. mbarrier doesn't define `_unflatten_ir`
+        self.liveins = self.generator.lscope.copy()
+        self.prev_defs = self.generator.local_defs.copy()
         self.generator.local_defs = {}
         self.used_vars = self.generator.used_vars.copy()
         self.generator.used_vars = set()
