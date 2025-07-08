@@ -262,6 +262,25 @@ def TTNG_ArriveBarrierOp : TTNG_Op<"arrive_barrier"> {
   let hasVerifier = 1;
 }
 
+def TTNG_TensorDescToTMAPtrOp : TTNG_Op<"tensor_desc_to_tma_ptr", [Pure]> {
+  let summary = "Convert tensor descriptor to pointer to tma descriptor";
+
+  let arguments = (ins TT_TensorDescType:$desc);
+  let results = (outs TT_Ptr:$ptr);
+
+  let assemblyFormat = [{
+    $desc attr-dict `:` qualified(type($desc)) `to` qualified(type($ptr))
+  }];
+
+  let builders = [
+    OpBuilder<(ins "Value":$desc), [{
+      auto ptrTy = triton::PointerType::get($_builder.getI8Type(), 1);
+      build($_builder, $_state, ptrTy, desc);
+    }]>
+  ];
+
+}
+
 def TTNG_AsyncCopyMbarrierArriveOp : TTNG_Op<"async_copy_mbarrier_arrive"> {
   let summary = "arrive on mbarrier once all previously issued copies are completed";
   let arguments = (ins
