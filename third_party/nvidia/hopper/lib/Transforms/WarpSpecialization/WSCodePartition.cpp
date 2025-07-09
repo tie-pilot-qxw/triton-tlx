@@ -45,9 +45,9 @@ static unsigned getNumBuffersOrDefault(scf::ForOp forOp, unsigned numBuffers) {
 // Get the bufferIdx and phase for the last iteration of the immediate scope.
 std::pair<Value, Value> getOutOfScopeBufferIdxAndPhase(
     OpBuilderWithAsyncTaskIds &builder, Operation *op, unsigned numBuffers,
-    const DenseSet<Operation *> &regionsWithChannels) {
+    const DenseSet<Operation *> &regionsWithChannels, ReuseConfig *config) {
   // Get the current in-scope accumulation count for op.
-  Value accumCnt = getAccumCount(builder, op, regionsWithChannels);
+  Value accumCnt = getAccumCount(builder, op, regionsWithChannels, config);
 
   // Get the out-of-scope accumulation count.
   assert(isa<BlockArgument>(accumCnt) &&
@@ -146,12 +146,12 @@ static void createChannel(Operation *producerOp, Operation *op,
             // Always use two buffers for TMEM channels.
             channels.push_back(std::make_unique<ttng::TmemDataChannel>(
                 producerTaskId, consumerTaskIds, tmemAllocOp, dotOp, userOp,
-                user.second, NUM_TMEM_BUFFERS));
+                user.second, NUM_TMEM_BUFFERS, channels.size()));
           }
         } else {
-          channels.push_back(
-              std::make_unique<Channel>(producerTaskId, consumerTaskIds, userOp,
-                                        user.second, producerNumBuffers));
+          channels.push_back(std::make_unique<Channel>(
+              producerTaskId, consumerTaskIds, userOp, user.second,
+              producerNumBuffers, channels.size()));
         }
       }
     }
@@ -839,12 +839,11 @@ DenseMap<Channel *, Value> createBuffer(
 // (TMEM load). If the inline barrier is used for A/B operands of gen5,
 // insert WaitBarrier as ProducerAquire; If it is used for D operand, insert
 // WaitBarrier as ConsumerWait.
-ttng::WaitBarrierOp
-desyncTCGen5MMAOp(OpBuilderWithAsyncTaskIds &builder, ttng::TCGen5MMAOp mmaOp,
-                  Value barrierAlloc, Value bufferIdx, Value inPhase,
-                  unsigned numBuffers, Operation *producerOrConsumer,
-                  DenseSet<Operation *> &regionsWithChannels,
-                  mlir::DominanceInfo &dom, bool asProducerAcquire) {
+ttng::WaitBarrierOp desyncTCGen5MMAOp(
+    OpBuilderWithAsyncTaskIds &builder, ttng::TCGen5MMAOp mmaOp,
+    Value barrierAlloc, Value bufferIdx, Value inPhase, unsigned numBuffers,
+    Operation *producerOrConsumer, DenseSet<Operation *> &regionsWithChannels,
+    mlir::DominanceInfo &dom, bool asProducerAcquire, ReuseConfig *config) {
   // Attach the barrier as an operand of the mma op.
   builder.setInsertionPoint(mmaOp);
   builder.setAsyncTaskIdsFromOp(mmaOp);
@@ -903,7 +902,7 @@ desyncTCGen5MMAOp(OpBuilderWithAsyncTaskIds &builder, ttng::TCGen5MMAOp mmaOp,
       // Compute the barrier from the last consumer instance
       // Extract the accum count from the consumer block.
       std::tie(bufferIdx, phase) = getOutOfScopeBufferIdxAndPhase(
-          builder, mmaOp, numBuffers, regionsWithChannels);
+          builder, mmaOp, numBuffers, regionsWithChannels, config);
       phase = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
           user->getLoc(), builder.getI32Type(), phase);
       consumerBarrier =
@@ -942,7 +941,7 @@ void insertAsyncComm(
     const DenseMap<Channel *, DenseMap<int, Value>> &barrierAllocMap,
     const DenseMap<Channel *, Value> &bufferMap,
     const DenseMap<Channel *, std::pair<Operation *, Operation *>> &copyOpMap,
-    DenseSet<Operation *> &regionsWithChannels) {
+    DenseSet<Operation *> &regionsWithChannels, ReuseConfig *config) {
 
   // Find the operation that is along producer's parent chain, and its parent
   // is the same op as producer's parent. Here p is producer, and c is consumer.
@@ -1105,7 +1104,7 @@ void insertAsyncComm(
         headProducer->dump();
       });
       getBufferIdxAndPhase(builder, headProducer, kv.second.front()->numBuffers,
-                           regionsWithChannels, bufferIdx, phase);
+                           regionsWithChannels, bufferIdx, phase, config);
     } else {
       // Producer is not in a ForOp, create phase and bufferIdx here.
       bufferIdx = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
@@ -1153,7 +1152,8 @@ void insertAsyncComm(
         desyncTCGen5MMAOp(builder, cast<ttng::TCGen5MMAOp>(mmaOp),
                           *commChannel.producerBarrier, bufferIdx, phase,
                           masterChannel->numBuffers, headConsumer,
-                          regionsWithChannels, dom, false);
+                          regionsWithChannels, dom, false /*asProducerAcquire*/,
+                          config);
       }
     }
     // Channel can have multiple consumers.
@@ -1178,7 +1178,7 @@ void insertAsyncComm(
         auto tmemWaitBarrier =
             desyncTCGen5MMAOp(builder, mmaOp, consumerBarrier, bufferIdx, phase,
                               masterChannel->numBuffers, headProducer,
-                              regionsWithChannels, dom, true);
+                              regionsWithChannels, dom, true, config);
         tmemWaitBarriers[mmaOp] = tmemWaitBarrier;
       }
     }
@@ -1351,7 +1351,9 @@ void doCodePartition(triton::FuncOp &funcOp, unsigned numBuffers) {
   }
   DenseSet<Operation *> regionsWithChannels;
   collectRegionsWithChannels(channels, regionsWithChannels);
-  appendAccumCntsForOps(asyncTaskTopOps, channels, regionsWithChannels);
+  ReuseConfig config;
+  appendAccumCntsForOps(asyncTaskTopOps, channels, regionsWithChannels,
+                        &config);
   LLVM_DEBUG({
     LDBG("\n\nafter appendAccumCntsForOps");
     funcOp.dump();
@@ -1369,7 +1371,7 @@ void doCodePartition(triton::FuncOp &funcOp, unsigned numBuffers) {
   // producers.
   DenseMap<Channel *, std::pair<Operation *, Operation *>> copyOpMap;
   insertAsyncCopy(funcOp, channelsGroupedByProducers, bufferMap, copyOpMap,
-                  regionsWithChannels);
+                  regionsWithChannels, &config);
   LLVM_DEBUG({
     LDBG("\n\nwith async copy");
     funcOp.dump();
@@ -1389,7 +1391,8 @@ void doCodePartition(triton::FuncOp &funcOp, unsigned numBuffers) {
   // Step 8: add async communication ops (ProducerAcquire etc). Also lower
   // TMA loads.
   insertAsyncComm(funcOp, channelsGroupedByConsumers, orderedChannels, tokenMap,
-                  barrierAllocMap, bufferMap, copyOpMap, regionsWithChannels);
+                  barrierAllocMap, bufferMap, copyOpMap, regionsWithChannels,
+                  &config);
   LLVM_DEBUG({
     LDBG("\n\nwith SyncOps");
     funcOp.dump();

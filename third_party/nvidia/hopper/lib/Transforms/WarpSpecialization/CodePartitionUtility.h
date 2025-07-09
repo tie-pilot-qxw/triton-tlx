@@ -21,9 +21,9 @@ public:
   using Relation = std::pair<int, SmallVector<int>>;
 
   Channel(int producer, SmallVector<int> &consumers, Operation *op,
-          unsigned operandIdx, unsigned numBuffers)
+          unsigned operandIdx, unsigned numBuffers, unsigned ID)
       : relation(producer, consumers), op(op), operandIdx(operandIdx),
-        numBuffers(numBuffers) {}
+        numBuffers(numBuffers), uniqID(ID) {}
 
   bool operator==(const Channel &c) {
     return relation == c.relation && operandIdx == c.operandIdx && op == c.op;
@@ -40,6 +40,17 @@ public:
   unsigned operandIdx;
   unsigned numBuffers;
   DataChannelKind channelKind = DataChannelKind::SMEM;
+  unsigned uniqID;
+};
+
+struct ReuseGroup {
+  std::vector<unsigned> channelIDs;
+};
+
+struct ReuseConfig {
+  // Each ReuseGroup
+  std::vector<ReuseGroup> groups;
+  unsigned getGroupSize() { return groups.size(); }
 };
 
 struct CommChannel {
@@ -63,8 +74,9 @@ struct TmemDataChannel : Channel {
   TmemDataChannel(int producer, SmallVector<int> &consumers,
                   ttng::TMEMAllocOp tmemAllocOp, ttng::TCGen5MMAOp tmemMmaOp,
                   Operation *tmemLoadOp, unsigned operandIdx,
-                  unsigned numBuffers)
-      : Channel(producer, consumers, tmemLoadOp, operandIdx, numBuffers),
+                  unsigned numBuffers, unsigned uniqID)
+      : Channel(producer, consumers, tmemLoadOp, operandIdx, numBuffers,
+                uniqID),
         tmemAllocOp(tmemAllocOp), tmemProducerOp(tmemAllocOp),
         tmemMmaOp(tmemMmaOp) {
     assert(consumers.size() == 1 &&
@@ -86,17 +98,20 @@ bool enclosing(scf::ForOp forOp, Operation *op);
 // AccumCnt for all channels under opsWithBufferReuse and it will be the
 // last AccumCnt.
 unsigned getAccumCnts(Operation *ctrlOp,
-                      const DenseSet<Operation *> &regionsWithChannels);
+                      const DenseSet<Operation *> &regionsWithChannels,
+                      ReuseConfig *config);
 
 unsigned getAccumArgIdx(scf::ForOp parentForOp, Operation *ctrlOp,
-                        const DenseSet<Operation *> &regionsWithChannels);
+                        const DenseSet<Operation *> &regionsWithChannels,
+                        ReuseConfig *config);
 
 SmallVector<Operation *>
 getTaskTopRegion(triton::FuncOp funcOp, const SmallVector<Channel *> &channels);
 
 void appendAccumCntsForOps(SmallVector<Operation *> &taskTopOps,
                            const SmallVector<Channel *> &channels,
-                           DenseSet<Operation *> &regionsWithChannels);
+                           DenseSet<Operation *> &regionsWithChannels,
+                           ReuseConfig *config);
 
 void collectRegionsWithChannels(const SmallVector<Channel *> &channels,
                                 DenseSet<Operation *> &regionsWithChannels);
@@ -106,17 +121,18 @@ void insertAsyncCopy(
         &channelsGroupedByProducers,
     const DenseMap<Channel *, Value> &bufferMap,
     DenseMap<Channel *, std::pair<Operation *, Operation *>> &copyOpMap,
-    DenseSet<Operation *> &regionsWithChannels);
+    DenseSet<Operation *> &regionsWithChannels, ReuseConfig *config);
 
 Value getAccumCount(OpBuilderWithAsyncTaskIds &builder, Operation *op,
-                    const DenseSet<Operation *> &regionsWithChannels);
+                    const DenseSet<Operation *> &regionsWithChannels,
+                    ReuseConfig *config);
 std::pair<Value, Value> getBufferIdxAndPhase(OpBuilderWithAsyncTaskIds &builder,
                                              Location loc, Value accumCnt,
                                              unsigned numBuffers);
 void getBufferIdxAndPhase(OpBuilderWithAsyncTaskIds &builder, Operation *op,
                           unsigned numBuffers,
                           const DenseSet<Operation *> &regionsWithChannels,
-                          Value &bufferIdx, Value &phase);
+                          Value &bufferIdx, Value &phase, ReuseConfig *config);
 
 Value getBarrierForPipelineStage(OpBuilderWithAsyncTaskIds &builder,
                                  Value barrierAlloc, Value bufferIdx);
