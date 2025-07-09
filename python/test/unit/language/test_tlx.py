@@ -691,10 +691,6 @@ def tlx_square_ws(
     n_elements,
     BLOCK_SIZE: tl.constexpr,
 ):
-    # prologue
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-
     # mbarrier ops
     bars = tlx.alloc_barriers(num_barriers=2)  # create
     b0 = tlx.local_view(bars, 0)
@@ -714,7 +710,8 @@ def tlx_square_ws(
 
             tlx.barrier_wait(bar=b0, phase=phase)  # Wait
 
-            # Some arith ops TODO. add WS
+            pid = tl.program_id(axis=0)
+            block_start = pid * BLOCK_SIZE
             offsets = block_start + tl.arange(0, BLOCK_SIZE)
             mask = offsets < n_elements
             x = tl.load(x_ptr + offsets, mask=mask)
