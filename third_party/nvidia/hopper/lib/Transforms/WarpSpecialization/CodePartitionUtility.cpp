@@ -74,7 +74,10 @@ unsigned getAccumCnts(Operation *ctrlOp,
   return cnt;
 }
 
-// Assume parentForOp has accumCnt for the specified ctrlOp.
+// Assume parentForOp has accumCnt for the specified ctrlOp. Find the ArgIdx
+// for ctrlOp in parentForOp. All accumCnts are placed at the end of the
+// argument list, in preorder for enclosed ctrl ops that contain a channel,
+// followed with accumCnts for channels in ReuseConfig.
 unsigned getAccumArgIdx(scf::ForOp parentForOp, Operation *ctrlOp,
                         const DenseSet<Operation *> &regionsWithChannels,
                         ReuseConfig *config) {

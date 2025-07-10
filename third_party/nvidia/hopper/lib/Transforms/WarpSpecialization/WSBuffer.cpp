@@ -100,10 +100,10 @@ void getAccumCntsPreOrder(Operation *ctrlOp,
 
 // Go through all the regions in opList and correctly add accumCnt. taskTopOps
 // will be updated if it is replaced in the process.
-Value updateAccumLoopCount(SmallVector<Operation *> &opList,
-                           SmallVector<Operation *> &taskTopOps,
-                           DenseSet<Operation *> &regionsWithChannels,
-                           Value prevAccum, ReuseConfig *config);
+void updateAccumLoopCount(SmallVector<Operation *> &opList,
+                          SmallVector<Operation *> &taskTopOps,
+                          DenseSet<Operation *> &regionsWithChannels,
+                          Value prevAccum, ReuseConfig *config);
 
 // prevAccum is the accumCnt prior to the forOp. This function goes through
 // the forOp and insert accumCnt when necessary.
@@ -165,8 +165,8 @@ scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
 
   // Go through region ops in the thenBlock. updateAccumLoopCount takes current
   // accumCnt value and returns the value at the end of the thenBlock.
-  Value endAccum = updateAccumLoopCount(opList, taskTopOps, regionsWithChannels,
-                                        prevAccum, config);
+  updateAccumLoopCount(opList, taskTopOps, regionsWithChannels, prevAccum,
+                       config);
 
   SmallVector<Value> ifYieldOperands = newIfOp.thenYield().getOperands();
 
@@ -315,8 +315,7 @@ scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
 
 // Handle the forOp given initial accumCnts.
 scf::ForOp createNewLoop(scf::ForOp forOp, scf::ForOp &parentForOp,
-                         SmallVector<Value> &initialAccums,
-                         Value accumulatedLoopCount) {
+                         SmallVector<Value> &initialAccums) {
   auto loc = forOp.getLoc();
   Block *body = forOp.getBody();
 
@@ -380,10 +379,10 @@ void collectRegionsWithChannels(const SmallVector<Channel *> &channels,
 
 // Go through a list of operations in opList, recursively call into
 // createNewLoopWrapper or rewriteIfOp.
-Value updateAccumLoopCount(SmallVector<Operation *> &opList,
-                           SmallVector<Operation *> &taskTopOps,
-                           DenseSet<Operation *> &regionsWithChannels,
-                           Value prevAccum, ReuseConfig *config) {
+void updateAccumLoopCount(SmallVector<Operation *> &opList,
+                          SmallVector<Operation *> &taskTopOps,
+                          DenseSet<Operation *> &regionsWithChannels,
+                          Value prevAccum, ReuseConfig *config) {
   DenseMap<Operation *, Operation *> oldToNew;
   for (Operation *op : opList) {
     if (auto forOp = dyn_cast<scf::ForOp>(op)) {
@@ -422,7 +421,6 @@ Value updateAccumLoopCount(SmallVector<Operation *> &opList,
     if (oldToNew.find(oldOp) != oldToNew.end())
       opList[i] = oldToNew[oldOp];
   }
-  return prevAccum;
 }
 
 scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
@@ -435,7 +433,6 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
   });
 
   scf::ForOp parentForOp = origForOp->getParentOfType<scf::ForOp>();
-  Value accumulatedLoopCount = prevAccum;
 
   unsigned pArgSize = 0, pCnts = 0, accumArgId = 0;
   if (parentForOp) {
@@ -474,8 +471,7 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
     initialAccums.push_back(startAccum);
   }
 
-  scf::ForOp newForOp = createNewLoop(origForOp, parentForOp, initialAccums,
-                                      accumulatedLoopCount);
+  scf::ForOp newForOp = createNewLoop(origForOp, parentForOp, initialAccums);
   LLVM_DEBUG({
     LDBG("after createNewLoop ");
     newForOp.dump();
@@ -503,8 +499,8 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
     if (auto tOp = dyn_cast<scf::IfOp>(&op))
       opList.push_back(&op);
   }
-  Value endAccum = updateAccumLoopCount(opList, taskTopOps, regionsWithChannels,
-                                        prevAccum, config);
+  updateAccumLoopCount(opList, taskTopOps, regionsWithChannels, prevAccum,
+                       config);
   LLVM_DEBUG({
     LDBG("-- before replacing yieldOp ");
     newForOp.dump();
