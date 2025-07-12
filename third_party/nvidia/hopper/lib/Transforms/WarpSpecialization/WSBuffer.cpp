@@ -103,18 +103,18 @@ void getAccumCntsPreOrder(Operation *ctrlOp,
 void updateAccumLoopCount(SmallVector<Operation *> &opList,
                           SmallVector<Operation *> &taskTopOps,
                           DenseSet<Operation *> &regionsWithChannels,
-                          Value prevAccum, ReuseConfig *config);
+                          ReuseConfig *config);
 
 // prevAccum is the accumCnt prior to the forOp. This function goes through
 // the forOp and insert accumCnt when necessary.
 scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
                                 SmallVector<Operation *> &taskTopOps,
                                 DenseSet<Operation *> &regionsWithChannels,
-                                Value prevAccum, ReuseConfig *config);
+                                ReuseConfig *config);
 
 scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
                       DenseSet<Operation *> &regionsWithChannels,
-                      Value prevAccum, ReuseConfig *config) {
+                      ReuseConfig *config) {
   OpBuilderWithAsyncTaskIds ifBuilder(ifOp.getContext());
   ifBuilder.setAsynTaskIdsFromArray(getNestedAsyncTaskIds(ifOp));
   ifBuilder.setInsertionPoint(ifOp);
@@ -165,8 +165,7 @@ scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
 
   // Go through region ops in the thenBlock. updateAccumLoopCount takes current
   // accumCnt value and returns the value at the end of the thenBlock.
-  updateAccumLoopCount(opList, taskTopOps, regionsWithChannels, prevAccum,
-                       config);
+  updateAccumLoopCount(opList, taskTopOps, regionsWithChannels, config);
 
   SmallVector<Value> ifYieldOperands = newIfOp.thenYield().getOperands();
 
@@ -382,23 +381,23 @@ void collectRegionsWithChannels(const SmallVector<Channel *> &channels,
 void updateAccumLoopCount(SmallVector<Operation *> &opList,
                           SmallVector<Operation *> &taskTopOps,
                           DenseSet<Operation *> &regionsWithChannels,
-                          Value prevAccum, ReuseConfig *config) {
+                          ReuseConfig *config) {
   DenseMap<Operation *, Operation *> oldToNew;
   for (Operation *op : opList) {
     if (auto forOp = dyn_cast<scf::ForOp>(op)) {
-      auto newForOp = createNewLoopWrapper(
-          forOp, taskTopOps, regionsWithChannels, prevAccum, config);
+      auto newForOp =
+          createNewLoopWrapper(forOp, taskTopOps, regionsWithChannels, config);
       oldToNew[op] = newForOp.getOperation();
     } else if (auto ifOp = dyn_cast<scf::IfOp>(op)) {
       if (enclosingAChannel(ifOp.getOperation(), regionsWithChannels)) {
-        auto newIfOp = rewriteIfOp(ifOp, taskTopOps, regionsWithChannels,
-                                   prevAccum, config);
+        auto newIfOp =
+            rewriteIfOp(ifOp, taskTopOps, regionsWithChannels, config);
         oldToNew[op] = newIfOp.getOperation();
 
         // Update prevAccum to be result of the new IfOp.
         assert(newIfOp.getNumResults() >= 1);
         auto numRes = newIfOp.getNumResults();
-        prevAccum =
+        Value prevAccum =
             newIfOp.getResult(numRes - 1); // accumCnt is the last result.
       } else {
         // Still need to process nested ForOps in pre-order.
@@ -409,8 +408,8 @@ void updateAccumLoopCount(SmallVector<Operation *> &opList,
           }
         });
         for (auto innerFor : innerForOps) {
-          auto newFor = createNewLoopWrapper(
-              innerFor, taskTopOps, regionsWithChannels, prevAccum, config);
+          auto newFor = createNewLoopWrapper(innerFor, taskTopOps,
+                                             regionsWithChannels, config);
           oldToNew[innerFor.getOperation()] = newFor.getOperation();
         }
       }
@@ -426,7 +425,7 @@ void updateAccumLoopCount(SmallVector<Operation *> &opList,
 scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
                                 SmallVector<Operation *> &taskTopOps,
                                 DenseSet<Operation *> &regionsWithChannels,
-                                Value prevAccum, ReuseConfig *config) {
+                                ReuseConfig *config) {
   LLVM_DEBUG({
     LDBG("call createNewLoop on");
     origForOp.dump();
@@ -499,8 +498,7 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
     if (auto tOp = dyn_cast<scf::IfOp>(&op))
       opList.push_back(&op);
   }
-  updateAccumLoopCount(opList, taskTopOps, regionsWithChannels, prevAccum,
-                       config);
+  updateAccumLoopCount(opList, taskTopOps, regionsWithChannels, config);
   LLVM_DEBUG({
     LDBG("-- before replacing yieldOp ");
     newForOp.dump();
@@ -593,8 +591,7 @@ void appendAccumCntsForOps(SmallVector<Operation *> &taskTopOps,
   // Go through all the regions in opList and correctly add accumCnt. taskTopOps
   // will be updated if it is replaced in the process.
   // tmpAccumLoopCount is the current accumCnt;
-  updateAccumLoopCount(opList, taskTopOps, regionsWithChannels,
-                       tmpAccumLoopCount, config);
+  updateAccumLoopCount(opList, taskTopOps, regionsWithChannels, config);
 }
 
 // As an example, suppose we have 4 channels with the following control flow.
