@@ -80,7 +80,7 @@ unsigned getAccumCnts(Operation *ctrlOp,
 // followed with accumCnts for channels in ReuseConfig.
 unsigned getAccumArgIdx(scf::ForOp parentForOp, Operation *ctrlOp,
                         const DenseSet<Operation *> &regionsWithChannels,
-                        ReuseConfig *config) {
+                        ReuseConfig *config, int reuseGroupIdx) {
   // Walk parentForOp in preorder.
   unsigned preOrderId = 0, ctrlId = 0;
   bool found = false;
@@ -148,14 +148,14 @@ std::pair<Value, Value> getBufferIdxAndPhase(OpBuilderWithAsyncTaskIds &builder,
 //   Channel D --> uses ForA.arg[accumForA]
 Value getAccumCount(OpBuilderWithAsyncTaskIds &builder, Operation *op,
                     const DenseSet<Operation *> &regionsWithChannels,
-                    ReuseConfig *config) {
+                    ReuseConfig *config, int reuseGroupIdx) {
   auto parentForOp = op->getParentOfType<scf::ForOp>();
   auto *pOp = op->getParentOp();
   // Get parentForOp.arg[pOp]
   unsigned tSize = parentForOp.getBody()->getArguments().size();
   unsigned parentTCnts = getAccumCnts(parentForOp, regionsWithChannels, config);
-  unsigned accumArgId =
-      getAccumArgIdx(parentForOp, pOp, regionsWithChannels, config);
+  unsigned accumArgId = getAccumArgIdx(parentForOp, pOp, regionsWithChannels,
+                                       config, reuseGroupIdx);
   Value accumCnt =
       parentForOp.getBody()->getArgument(tSize - parentTCnts + accumArgId);
 
@@ -168,8 +168,10 @@ Value getAccumCount(OpBuilderWithAsyncTaskIds &builder, Operation *op,
 void getBufferIdxAndPhase(OpBuilderWithAsyncTaskIds &builder, Operation *op,
                           unsigned numBuffers,
                           const DenseSet<Operation *> &regionsWithChannels,
-                          Value &bufferIdx, Value &phase, ReuseConfig *config) {
-  Value accumCnt = getAccumCount(builder, op, regionsWithChannels, config);
+                          Value &bufferIdx, Value &phase, ReuseConfig *config,
+                          int reuseGroupIdx) {
+  Value accumCnt =
+      getAccumCount(builder, op, regionsWithChannels, config, reuseGroupIdx);
   std::tie(bufferIdx, phase) =
       getBufferIdxAndPhase(builder, op->getLoc(), accumCnt, numBuffers);
 }

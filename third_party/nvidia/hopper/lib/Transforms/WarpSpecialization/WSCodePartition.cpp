@@ -43,11 +43,14 @@ static unsigned getNumBuffersOrDefault(scf::ForOp forOp, unsigned numBuffers) {
 }
 
 // Get the bufferIdx and phase for the last iteration of the immediate scope.
-std::pair<Value, Value> getOutOfScopeBufferIdxAndPhase(
-    OpBuilderWithAsyncTaskIds &builder, Operation *op, unsigned numBuffers,
-    const DenseSet<Operation *> &regionsWithChannels, ReuseConfig *config) {
+std::pair<Value, Value>
+getOutOfScopeBufferIdxAndPhase(OpBuilderWithAsyncTaskIds &builder,
+                               Operation *op, unsigned numBuffers,
+                               const DenseSet<Operation *> &regionsWithChannels,
+                               ReuseConfig *config, int reuseGroupIdx) {
   // Get the current in-scope accumulation count for op.
-  Value accumCnt = getAccumCount(builder, op, regionsWithChannels, config);
+  Value accumCnt =
+      getAccumCount(builder, op, regionsWithChannels, config, reuseGroupIdx);
 
   // Get the out-of-scope accumulation count.
   assert(isa<BlockArgument>(accumCnt) &&
@@ -902,7 +905,7 @@ ttng::WaitBarrierOp desyncTCGen5MMAOp(
       // Compute the barrier from the last consumer instance
       // Extract the accum count from the consumer block.
       std::tie(bufferIdx, phase) = getOutOfScopeBufferIdxAndPhase(
-          builder, mmaOp, numBuffers, regionsWithChannels, config);
+          builder, mmaOp, numBuffers, regionsWithChannels, config, -1);
       phase = builder.createWithAsyncTaskIds<arith::ExtSIOp>(
           user->getLoc(), builder.getI32Type(), phase);
       consumerBarrier =

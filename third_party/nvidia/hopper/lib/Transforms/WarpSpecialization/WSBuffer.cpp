@@ -112,6 +112,109 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
                                 DenseSet<Operation *> &regionsWithChannels,
                                 ReuseConfig *config);
 
+// We need to handle thenYield and elseYield for a given IfOp. We handle
+// the IfOp itself if it directly contains a channel, we then handle regions
+// ops in thenBlock.
+// When reuseGroupIdx is non-negative, handle the reuseGroup.
+static void generateYieldCntsForIfOp(scf::IfOp ifOp, Value &thenYield,
+                                     Value &elseYield,
+                                     DenseSet<Operation *> &regionsWithChannels,
+                                     ReuseConfig *config, int reuseGroupIdx,
+                                     OpBuilderWithAsyncTaskIds &ifBuilder,
+                                     OpBuilderWithAsyncTaskIds &elseBuilder) {
+  auto parentForOp = ifOp->getParentOfType<scf::ForOp>();
+  auto *op = ifOp.getOperation();
+  Value endAccum, endAccumElse;
+  auto loc = ifOp.getLoc();
+  if (parentForOp) {
+    unsigned parentArgSize = parentForOp.getBody()->getArguments().size();
+    // Get corresponding argument of accumCnt for "op" in parentForOp.
+    unsigned accumArgId = getAccumArgIdx(parentForOp, op, regionsWithChannels,
+                                         config, reuseGroupIdx);
+    unsigned parentTCnts =
+        getAccumCnts(parentForOp.getOperation(), regionsWithChannels, config);
+    LDBG("rewrite ifOp: ifOp itself parentArg " << parentArgSize << " "
+                                                << accumArgId);
+    // All the accumCnts are at the end of argument list. When accumArgId
+    // is parentTCnts - 1, the corresponding accumCnt will be the last
+    // argument.
+    Value arg = parentForOp.getBody()->getArgument(parentArgSize - parentTCnts +
+                                                   accumArgId);
+    // Either parent[accumCnt] + 1 or parent[accumCnt].
+    Value one =
+        ifBuilder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 64);
+    endAccum = ifBuilder.createWithAsyncTaskIds<arith::AddIOp>(loc, arg, one);
+    endAccumElse = arg;
+  } else {
+    endAccum =
+        ifBuilder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 64);
+    endAccumElse =
+        elseBuilder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 64);
+  }
+  LLVM_DEBUG({
+    LDBG("Update yieldOperands ");
+    endAccum.dump();
+    endAccumElse.dump();
+  });
+}
+
+// regionOp: inside thenBlock of ifOp.
+// There can be a list of accumCnts associated
+// with the regionOp, for which we need arguments on the ifOp
+static void generateYieldCntsForThenBlock(
+    scf::IfOp ifOp, Operation *regionOp, SmallVector<Value> &thenYields,
+    SmallVector<Value> &elseYields, DenseSet<Operation *> &regionsWithChannels,
+    ReuseConfig *config, int reuseGroupIdx,
+    OpBuilderWithAsyncTaskIds &ifBuilder,
+    OpBuilderWithAsyncTaskIds &elseBuilder) {
+  SmallVector<Operation *> preOrderOps;
+  getAccumCntsPreOrder(regionOp, regionsWithChannels, preOrderOps);
+  if (preOrderOps.empty())
+    return;
+  auto numRes = regionOp->getNumResults();
+  unsigned tCnts = preOrderOps.size();
+  LDBG("rewrite ifOp: thenBlock " << tCnts << " accumCnts");
+
+  unsigned accumArgId, parentArgSize, parentTCnts;
+  auto parentForOp = ifOp->getParentOfType<scf::ForOp>();
+  if (parentForOp) {
+    parentArgSize = parentForOp.getBody()->getArguments().size();
+    // Find accumArgId for preOrderOps[0] in parentForOp.
+    accumArgId = getAccumArgIdx(parentForOp, preOrderOps[0],
+                                regionsWithChannels, config, reuseGroupIdx);
+    parentTCnts =
+        getAccumCnts(parentForOp.getOperation(), regionsWithChannels, config);
+  }
+  auto loc = ifOp.getLoc();
+
+  // Set up value for thenYield and elseYield for accumCnts nested under "op".
+  // Each accumCnt nested under "op", it will have a corresponding argument in
+  // this "IfOp". If "op" has tCnts, this "IfOp" will have the same number of
+  // corresponding accumCnts, in the same order.
+  for (unsigned i = 0; i < tCnts; ++i) {
+    // Handle each accumCnt for "op".
+    Value endAccum = regionOp->getResult(numRes - tCnts + i);
+    thenYields.push_back(endAccum);
+
+    // Find the corresponding accumArgId from parentForOp.
+    Value elseVal;
+    if (parentForOp) {
+      elseVal = parentForOp.getBody()->getArgument(parentArgSize - parentTCnts +
+                                                   accumArgId + i);
+      LDBG("rewrite ifOp: elseYield parentArg " << parentArgSize << " "
+                                                << accumArgId << " " << i);
+    } else
+      elseVal =
+          elseBuilder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 64);
+    elseYields.push_back(elseVal);
+    LLVM_DEBUG({
+      LDBG("Update yieldOperands ");
+      endAccum.dump();
+      elseVal.dump();
+    });
+  }
+}
+
 scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
                       DenseSet<Operation *> &regionsWithChannels,
                       ReuseConfig *config) {
@@ -197,16 +300,11 @@ scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
   ifBuilder.setInsertionPoint(newIfOp.thenYield());
 
   auto parentForOp = newIfOp->getParentOfType<scf::ForOp>();
-  unsigned parentArgSize, parentTCnts = 0;
   SmallVector<Operation *> preOrderOpsOfParent;
   if (parentForOp) {
-    parentArgSize = parentForOp.getBody()->getArguments().size();
     getAccumCntsPreOrder(parentForOp.getOperation(), regionsWithChannels,
                          preOrderOpsOfParent);
-    parentTCnts =
-        getAccumCnts(parentForOp.getOperation(), regionsWithChannels, config);
   }
-  LDBG("rewrite ifOp: parentFor " << parentTCnts << " accumCnts");
 
   // For this IfOp, add accumCnts in preorder, starting with the IfOp itself
   // if it contains a channel. It then goes through the body of thenBlock, add
@@ -219,33 +317,15 @@ scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
       break;
     }
   }
+  // TODO: refactor helper to get valueForIf and valueForElse. We need to
+  // handle yield values for accumCnts of unique channels and reuse channels.
   if (hasDirectChannel) {
     // Set up value for thenYield and elseYield for accumCnt associated with
     // "newIfOp".
-    auto *op = newIfOp.getOperation();
     Value endAccum, endAccumElse;
-    if (parentForOp) {
-      // Get corresponding argument of accumCnt for "op" in parentForOp.
-      unsigned accumArgId =
-          getAccumArgIdx(parentForOp, op, regionsWithChannels, config);
-      LDBG("rewrite ifOp: ifOp itself parentArg " << parentArgSize << " "
-                                                  << accumArgId);
-      // All the accumCnts are at the end of argument list. When accumArgId
-      // is parentTCnts - 1, the corresponding accumCnt will be the last
-      // argument.
-      Value arg = parentForOp.getBody()->getArgument(parentArgSize -
-                                                     parentTCnts + accumArgId);
-      // Either parent[accumCnt] + 1 or parent[accumCnt].
-      Value one =
-          ifBuilder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 64);
-      endAccum = ifBuilder.createWithAsyncTaskIds<arith::AddIOp>(loc, arg, one);
-      endAccumElse = arg;
-    } else {
-      endAccum =
-          ifBuilder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 64);
-      endAccumElse =
-          elseBuilder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 0, 64);
-    }
+    generateYieldCntsForIfOp(newIfOp, endAccum, endAccumElse,
+                             regionsWithChannels, config, -1, ifBuilder,
+                             elseBuilder);
     ifYieldOperands.push_back(endAccum);
     elseYieldOperands.push_back(endAccumElse);
     LLVM_DEBUG({
@@ -259,45 +339,15 @@ scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
   for (auto *op : opList) {
     if (!enclosingAChannel(op, regionsWithChannels))
       continue;
-
-    SmallVector<Operation *> preOrderOps;
-    getAccumCntsPreOrder(op, regionsWithChannels, preOrderOps);
-    auto numRes = op->getNumResults();
-    unsigned tCnts = preOrderOps.size();
-    LDBG("rewrite ifOp: thenBlock " << tCnts << " accumCnts");
-
-    unsigned accumArgId;
-    if (parentForOp && preOrderOps.size() > 0)
-      // Find accumArgId for preOrderOps[0] in parentForOp.
-      accumArgId = getAccumArgIdx(parentForOp, preOrderOps[0],
-                                  regionsWithChannels, config);
-
-    // Set up value for thenYield and elseYield for accumCnts nested under "op".
-    // Each accumCnt nested under "op", it will have a corresponding argument in
-    // this "IfOp". If "op" has tCnts, this "IfOp" will have the same number of
-    // corresponding accumCnts, in the same order.
-    for (unsigned i = 0; i < tCnts; ++i) {
-      // Handle each accumCnt for "op".
-      Value endAccum = op->getResult(numRes - tCnts + i);
-      ifYieldOperands.push_back(endAccum);
-
-      // Find the corresponding accumArgId from parentForOp.
-      Value elseVal;
-      if (parentForOp) {
-        elseVal = parentForOp.getBody()->getArgument(
-            parentArgSize - parentTCnts + accumArgId + i);
-        LDBG("rewrite ifOp: elseYield parentArg " << parentArgSize << " "
-                                                  << accumArgId << " " << i);
-      } else
-        elseVal = elseBuilder.createWithAsyncTaskIds<arith::ConstantIntOp>(
-            loc, 0, 64);
-      elseYieldOperands.push_back(elseVal);
-      LLVM_DEBUG({
-        LDBG("Update yieldOperands ");
-        endAccum.dump();
-        elseVal.dump();
-      });
-    }
+    SmallVector<Value> thenYields;
+    SmallVector<Value> elseYields;
+    generateYieldCntsForThenBlock(newIfOp, op, thenYields, elseYields,
+                                  regionsWithChannels, config, -1, ifBuilder,
+                                  elseBuilder);
+    for (auto V : thenYields)
+      ifYieldOperands.push_back(V);
+    for (auto V : elseYields)
+      elseYieldOperands.push_back(V);
   }
   // Update Yields.
   updateYield(newIfOp.thenYield(), ifYieldOperands);
@@ -448,7 +498,7 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
   if (preOrderOps.size() > 0 && parentForOp) {
     // Find the accumArgId for preOrderOps[0] in parentForOp.
     accumArgId = getAccumArgIdx(parentForOp, preOrderOps[0],
-                                regionsWithChannels, config);
+                                regionsWithChannels, config, -1);
   }
 
   // Get initial value of accumCnts prior to the loop.

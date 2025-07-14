@@ -94,16 +94,18 @@ struct TmemDataChannel : Channel {
 bool enclosing(scf::IfOp ifOp, Operation *op);
 bool enclosing(scf::ForOp forOp, Operation *op);
 
-// Return number of AccumCnts for the given ctrlOp. Add a single
-// AccumCnt for all channels under opsWithBufferReuse and it will be the
-// last AccumCnt.
+// Return number of AccumCnts for the given ctrlOp. AccumCnts due to reuses
+// will be at the end, we go through all ReuseGroups and if any channel in
+// the group is nested under ctrlOp, we add one accumCnt for this group.
 unsigned getAccumCnts(Operation *ctrlOp,
                       const DenseSet<Operation *> &regionsWithChannels,
                       ReuseConfig *config);
 
+// We pass in groupIdx, if it is -1, we are getting accumCnt for a channel
+// not in a reuse group, directly in ctrlOp.
 unsigned getAccumArgIdx(scf::ForOp parentForOp, Operation *ctrlOp,
                         const DenseSet<Operation *> &regionsWithChannels,
-                        ReuseConfig *config);
+                        ReuseConfig *config, int reuseGroupIdx);
 
 SmallVector<Operation *>
 getTaskTopRegion(triton::FuncOp funcOp, const SmallVector<Channel *> &channels);
@@ -125,14 +127,15 @@ void insertAsyncCopy(
 
 Value getAccumCount(OpBuilderWithAsyncTaskIds &builder, Operation *op,
                     const DenseSet<Operation *> &regionsWithChannels,
-                    ReuseConfig *config);
+                    ReuseConfig *config, int reuseGroupIdx);
 std::pair<Value, Value> getBufferIdxAndPhase(OpBuilderWithAsyncTaskIds &builder,
                                              Location loc, Value accumCnt,
                                              unsigned numBuffers);
 void getBufferIdxAndPhase(OpBuilderWithAsyncTaskIds &builder, Operation *op,
                           unsigned numBuffers,
                           const DenseSet<Operation *> &regionsWithChannels,
-                          Value &bufferIdx, Value &phase, ReuseConfig *config);
+                          Value &bufferIdx, Value &phase, ReuseConfig *config,
+                          int reuseGroupIdx = -1);
 
 Value getBarrierForPipelineStage(OpBuilderWithAsyncTaskIds &builder,
                                  Value barrierAlloc, Value bufferIdx);
