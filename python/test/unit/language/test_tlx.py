@@ -467,6 +467,80 @@ def test_local_trans(device):
 
 
 @pytest.mark.skipif(
+    not is_cuda() or torch.cuda.get_device_capability()[0] < 10,
+    reason="Requires compute capability >= 10 for NV",
+)
+def test_local_reinterpret(device):
+
+    @triton.jit
+    def local_reinterpret_kernel(
+        x32_ptr,
+        y32_ptr,
+        x16_ptr,
+        y16_ptr,
+        BLOCK_SIZE_M: tl.constexpr,
+        BLOCK_SIZE_N: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+
+        # Compute tile offset in global memory
+        off_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        off_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+
+        # Compute global offsets
+        input_offset = off_m[:, None] * BLOCK_SIZE_N + off_n[None, :]
+        output_offset = off_m[:, None] * BLOCK_SIZE_N + off_n[None, :]
+
+        tmem_buffers = tlx.local_alloc((BLOCK_SIZE_M, BLOCK_SIZE_N), tl.float32, tl.constexpr(1), tlx.storage_kind.tmem)
+        tmem_buffer_0 = tlx.local_view(tmem_buffers, 0)
+
+        # x32 GMEM -> x32 SMEM -> x32 Reg -> x32 TMEM -> x32 Reg -> y32 GMEM
+        smem_buffers32 = tlx.local_alloc((BLOCK_SIZE_M, BLOCK_SIZE_N), tl.float32, tl.constexpr(1),
+                                         tlx.storage_kind.smem)
+        smem_buffer_32_0 = tlx.local_view(smem_buffers32, 0)
+        tlx.async_load(x32_ptr + input_offset, smem_buffer_32_0)
+        tlx.async_load_commit_group()
+        tlx.async_load_wait_group(tl.constexpr(0))
+
+        x32_reg = tlx.local_load(smem_buffer_32_0)
+        tlx.local_store(tmem_buffer_0, x32_reg, tlx.storage_kind.tmem)
+        x32_reg_from_tmem = tlx.local_load(tmem_buffer_0, tlx.storage_kind.tmem)
+        tl.store(y32_ptr + output_offset, x32_reg_from_tmem)
+
+        # x16 GMEM -> x16 SMEM -> x16 Reg -> x16 TMEM -> x16 Reg -> y16 GMEM
+        smem_buffers16 = tlx.local_alloc((BLOCK_SIZE_M, BLOCK_SIZE_N), tl.float16, tl.constexpr(1),
+                                         tlx.storage_kind.smem)
+        smem_buffer_16_0 = tlx.local_view(smem_buffers16, 0)
+        tlx.async_load(x16_ptr + input_offset, smem_buffer_16_0)
+        tlx.async_load_commit_group()
+        tlx.async_load_wait_group(tl.constexpr(0))
+
+        reinterpreted = tlx.local_reinterpret(tmem_buffer_0, tl.float16)
+
+        x16_reg = tlx.local_load(smem_buffer_16_0)
+        tlx.local_store(reinterpreted, x16_reg, tlx.storage_kind.tmem)
+        x16_reg_from_tmem = tlx.local_load(reinterpreted, tlx.storage_kind.tmem)
+        tl.store(y16_ptr + output_offset, x16_reg_from_tmem)
+
+    torch.manual_seed(0)
+    M, N = 64, 128
+    BLOCK_SIZE_M, BLOCK_SIZE_N = M, N
+    x32 = torch.rand((M, N), dtype=torch.float32, device=device)
+    y32 = torch.zeros((M, N), dtype=torch.float32, device=device)
+    x16 = torch.rand((M, N), dtype=torch.float16, device=device)
+    y16 = torch.zeros((M, N), dtype=torch.float16, device=device)
+    grid = lambda meta: (1, )
+    kernel = local_reinterpret_kernel[grid](x32, y32, x16, y16, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N)
+    assert kernel.asm["ttgir"].count("ttg.memdesc_reinterpret") == 1
+    assert kernel.asm["ttgir"].count("ttng.tmem_store") == 2
+    assert kernel.asm["ttgir"].count("ttng.tmem_alloc") == 1
+
+    torch.testing.assert_close(x32, y32)
+    torch.testing.assert_close(x16, y16)
+
+
+@pytest.mark.skipif(
     not is_cuda() or torch.cuda.get_device_capability()[0] != 9,
     reason="Requires compute capability == 9 for NV",
 )
@@ -474,7 +548,7 @@ def test_async_dot(device):
 
     @triton.jit
     def wgmma_kernel_A_smem(X, stride_xm, stride_xk, Y, stride_yk, stride_yn, Z, stride_zm, stride_zn,
-               BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+                            BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
         off_m = tl.arange(0, BLOCK_M)
         off_n = tl.arange(0, BLOCK_N)
         off_k = tl.arange(0, BLOCK_K)
@@ -500,10 +574,9 @@ def test_async_dot(device):
         c_ptrs = Z + stride_zm * off_m[:, None] + stride_zn * off_n[None, :]
         tl.store(c_ptrs, c)
 
-
     @triton.jit
     def wgmma_kernel_A_reg(X, stride_xm, stride_xk, Y, stride_yk, stride_yn, Z, stride_zm, stride_zn,
-               BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+                           BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
         off_m = tl.arange(0, BLOCK_M)
         off_n = tl.arange(0, BLOCK_N)
         off_k = tl.arange(0, BLOCK_K)
@@ -536,7 +609,7 @@ def test_async_dot(device):
     # test smem
     kern_kwargs = {'BLOCK_M': M, 'BLOCK_K': K, 'BLOCK_N': N}
     kernel = wgmma_kernel_A_smem[(1, 1)](x, x.stride(0), x.stride(1), y, y.stride(0), y.stride(1), z, z.stride(0),
-                                       z.stride(1), **kern_kwargs)
+                                         z.stride(1), **kern_kwargs)
     ttgir = kernel.asm["ttgir"]
     assert ttgir.count("ttg.async_copy_global_to_local") == 2
     z_ref = torch.matmul(x, y)
@@ -545,7 +618,7 @@ def test_async_dot(device):
     # test reg
     kern_kwargs = {'BLOCK_M': M, 'BLOCK_K': K, 'BLOCK_N': N}
     kernel = wgmma_kernel_A_reg[(1, 1)](x, x.stride(0), x.stride(1), y, y.stride(0), y.stride(1), z, z.stride(0),
-                                       z.stride(1), **kern_kwargs)
+                                        z.stride(1), **kern_kwargs)
     ttgir = kernel.asm["ttgir"]
     assert ttgir.count("ttg.async_copy_global_to_local") == 1
     torch.testing.assert_close(z, z_ref)
@@ -624,6 +697,79 @@ def test_async_dot_blackwell(device):
     assert ptx.count("tcgen05.dealloc") == 1
 
     ref_out = torch.matmul(x, y) + torch.matmul(x, y)
+    torch.testing.assert_close(z, ref_out)
+
+
+@pytest.mark.skipif(
+    not is_cuda() or torch.cuda.get_device_capability()[0] != 10,
+    reason="Requires compute capability == 10 (Blackwell) for NV",
+)
+def test_async_dot_blackwell_tmem_A(device):
+    """
+    Test D = A*B where A is in TMEM instead of SMEM
+    """
+
+    @triton.jit
+    def tcgen5_dot_kernel_tmem_A(a_ptr, stride_am, stride_ak, b_ptr, stride_bk, stride_bn, c_ptr, stride_cm, stride_cn,
+                                 BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+                                 OUT_DTYPE: tl.constexpr):
+        offs_m = tl.arange(0, BLOCK_M)
+        offs_n = tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+
+        a_ptrs = a_ptr + (offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak)
+        b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn)
+
+        # init acc in TMEM
+        acc_init = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        acc_buffers = tlx.local_alloc((BLOCK_M, BLOCK_N), tl.float32, tl.constexpr(1), tlx.storage_kind.tmem)
+        acc_tmem = tlx.local_view(acc_buffers, 0)
+        tlx.local_store(acc_tmem, acc_init, tlx.storage_kind.tmem)
+
+        # async load a and b into SMEM
+        buf_alloc_a = tlx.local_alloc((BLOCK_M, BLOCK_K), tl.float16, tl.constexpr(1))
+        buf_alloc_b = tlx.local_alloc((BLOCK_K, BLOCK_N), tl.float16, tl.constexpr(1))
+        a_smem = tlx.local_view(buf_alloc_a, 0)
+        b_smem = tlx.local_view(buf_alloc_b, 0)
+        tlx.async_load(a_ptrs, a_smem)
+        tlx.async_load(b_ptrs, b_smem)
+        tlx.async_load_commit_group()
+        tlx.async_load_wait_group(tl.constexpr(0))
+
+        # load A from SMEM to Reg
+        a_reg = tlx.local_load(a_smem)
+
+        # store A to TMEM
+        buffers_a = tlx.local_alloc((BLOCK_M, BLOCK_K), tl.float16, tl.constexpr(1), tlx.storage_kind.tmem)
+        a_tmem = tlx.local_view(buffers_a, 0)
+        tlx.local_store(a_tmem, a_reg, tlx.storage_kind.tmem)
+
+        # acc_tmem = acc_tmem + a_tmem * b_smem
+        tlx.async_dot(a_tmem, b_smem, acc_tmem, mBarrier=None, out_dtype=OUT_DTYPE)
+        # load result from TMEM to Reg
+        result = tlx.local_load(acc_tmem, tlx.storage_kind.tmem)
+
+        c = result.to(tl.float16)
+        c_ptrs = c_ptr + stride_cm * offs_m[:, None] + stride_cn * offs_n[None, :]
+        tl.store(c_ptrs, c)
+
+    torch.manual_seed(0)
+    M, N, K = (64, 32, 32)
+    x = torch.randn((M, K), device=device, dtype=torch.float16)
+    y = torch.randn((K, N), device=device, dtype=torch.float16)
+    z = torch.zeros((M, N), device=device, dtype=torch.float16)
+
+    kern_kwargs = {'BLOCK_M': M, 'BLOCK_K': K, 'BLOCK_N': N, 'OUT_DTYPE': tl.float32}
+    kernel = tcgen5_dot_kernel_tmem_A[(1, 1)](x, x.stride(0), x.stride(1), y, y.stride(0), y.stride(1), z, z.stride(0),
+                                              z.stride(1), **kern_kwargs)
+
+    ttgir = kernel.asm["ttgir"]
+    assert ttgir.count("ttng.tmem_alloc") == 2
+    assert ttgir.count("ttng.tmem_store") == 2
+    assert ttgir.count("ttng.tc_gen5_mma") == 1
+
+    xy = torch.matmul(x, y)
+    ref_out = xy
     torch.testing.assert_close(z, ref_out)
 
 
@@ -782,6 +928,73 @@ def test_wait_arrive_ws(BLOCK_SIZE, device):
     not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
     reason="Requires compute capability >= 9 for NV",
 )
+@pytest.mark.parametrize("BLOCK_SIZE", [(1024)])
+# def test_mbarriers(BLOCK_SIZE, device):
+def test_named_wait_arrive(BLOCK_SIZE, device):
+
+    @triton.jit
+    def add2_warp_specialized_pingpong_kernel(
+        x_ptr,
+        y_ptr,
+        z_ptr,
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        n_elements,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(axis=0)
+        block_start = pid * BLOCK_SIZE
+        with tlx.async_tasks():
+            with tlx.async_task("default"):
+                tlx.named_barrier_wait(9, 256)
+                tlx.named_barrier_arrive(10, 256)
+                offsets = block_start + tl.arange(0, BLOCK_SIZE)
+                mask = offsets < n_elements
+                x = tl.load(x_ptr + offsets, mask=mask)
+                y = tl.load(y_ptr + offsets, mask=mask)
+                output = x + y
+                tl.store(z_ptr + offsets, output, mask=mask)
+            with tlx.async_task(num_warps=4, registers=100):
+                tlx.named_barrier_arrive(9, 256)
+                tlx.named_barrier_wait(10, 256)
+                offsets = block_start + tl.arange(0, BLOCK_SIZE)
+                mask = offsets < n_elements
+                a = tl.load(a_ptr + offsets, mask=mask)
+                b = tl.load(b_ptr + offsets, mask=mask)
+                output = a + b
+                tl.store(c_ptr + offsets, output, mask=mask)
+
+    def dual_add(x, y, a, b):
+        return x + y, a + b
+
+    torch.manual_seed(0)
+    size = 98432
+    x = torch.rand(size, device=device)
+    y = torch.rand(size, device=device)
+    a = torch.rand(size, device=device)
+    b = torch.rand(size, device=device)
+
+    output1 = torch.empty_like(x)
+    output2 = torch.empty_like(a)
+    n_elements = output1.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
+    kernel = add2_warp_specialized_pingpong_kernel[grid](x, y, output1, a, b, output2, n_elements, BLOCK_SIZE)
+    ttgir = kernel.asm["ttgir"]
+    assert ttgir.count("ttng.wait_barrier_named %c9_i32, %c256_i32") == 1
+    assert ttgir.count("ttng.arrive_barrier_named %c10_i32, %c256_i32") == 1
+    assert ttgir.count("ttng.arrive_barrier_named %c9_i32_1, %c256_i32") == 1
+    assert ttgir.count("ttng.wait_barrier_named %c10_i32_0, %c256_i32") == 1
+
+    ref_out1, ref_out2 = dual_add(x, y, a, b)
+    torch.testing.assert_close(output1, ref_out1, check_dtype=False)
+    torch.testing.assert_close(output2, ref_out2, check_dtype=False)
+
+
+@pytest.mark.skipif(
+    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
+    reason="Requires compute capability >= 9 for NV",
+)
 def test_descriptor_load(device):
 
     def alloc_fn(size: int, align: int, stream: Optional[int]):
@@ -885,7 +1098,6 @@ def test_local_gather(device):
             buffer_out = tlx.local_view(buffers_out, k)
             in_local = tlx.local_load(buffer_in)
             tlx.local_store(buffer_out, in_local)
-
 
         buffer_out = tlx.local_view(buffers_out, 0)
         tlx.async_descriptor_store(desc_out, buffer_out, [off_m, off_n])
