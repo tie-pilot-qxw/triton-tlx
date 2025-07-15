@@ -112,25 +112,21 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
                                 DenseSet<Operation *> &regionsWithChannels,
                                 ReuseConfig *config);
 
-// We need to handle thenYield and elseYield for a given IfOp. We handle
-// the IfOp itself if it directly contains a channel, we then handle regions
-// ops in thenBlock.
-// When reuseGroupIdx is non-negative, handle the reuseGroup.
-static void generateYieldCntsForIfOp(scf::IfOp ifOp, Value &thenYield,
-                                     Value &elseYield,
+// If there is a channel directly inside IfOp, update endAccum and endAccumElse.
+static void generateYieldCntsForIfOp(scf::IfOp ifOp, Value &endAccum,
+                                     Value &endAccumElse,
                                      DenseSet<Operation *> &regionsWithChannels,
-                                     ReuseConfig *config, int reuseGroupIdx,
+                                     ReuseConfig *config,
                                      OpBuilderWithAsyncTaskIds &ifBuilder,
                                      OpBuilderWithAsyncTaskIds &elseBuilder) {
   auto parentForOp = ifOp->getParentOfType<scf::ForOp>();
   auto *op = ifOp.getOperation();
-  Value endAccum, endAccumElse;
   auto loc = ifOp.getLoc();
   if (parentForOp) {
     unsigned parentArgSize = parentForOp.getBody()->getArguments().size();
     // Get corresponding argument of accumCnt for "op" in parentForOp.
-    unsigned accumArgId = getAccumArgIdx(parentForOp, op, regionsWithChannels,
-                                         config, reuseGroupIdx);
+    unsigned accumArgId = getAccumArgIdx(parentForOp, ifOp.getOperation(),
+                                         regionsWithChannels, config, -1);
     unsigned parentTCnts =
         getAccumCnts(parentForOp.getOperation(), regionsWithChannels, config);
     LDBG("rewrite ifOp: ifOp itself parentArg " << parentArgSize << " "
@@ -159,13 +155,12 @@ static void generateYieldCntsForIfOp(scf::IfOp ifOp, Value &thenYield,
 }
 
 // regionOp: inside thenBlock of ifOp.
-// There can be a list of accumCnts associated
-// with the regionOp, for which we need arguments on the ifOp
+// There can be a list of accumCnts associated with the regionOp, for which we
+// need arguments on the ifOp.
 static void generateYieldCntsForThenBlock(
     scf::IfOp ifOp, Operation *regionOp, SmallVector<Value> &thenYields,
     SmallVector<Value> &elseYields, DenseSet<Operation *> &regionsWithChannels,
-    ReuseConfig *config, int reuseGroupIdx,
-    OpBuilderWithAsyncTaskIds &ifBuilder,
+    ReuseConfig *config, OpBuilderWithAsyncTaskIds &ifBuilder,
     OpBuilderWithAsyncTaskIds &elseBuilder) {
   SmallVector<Operation *> preOrderOps;
   getAccumCntsPreOrder(regionOp, regionsWithChannels, preOrderOps);
@@ -173,6 +168,7 @@ static void generateYieldCntsForThenBlock(
     return;
   auto numRes = regionOp->getNumResults();
   unsigned tCnts = preOrderOps.size();
+  unsigned tCntsTotal = getAccumCnts(regionOp, regionsWithChannels, config);
   LDBG("rewrite ifOp: thenBlock " << tCnts << " accumCnts");
 
   unsigned accumArgId, parentArgSize, parentTCnts;
@@ -181,7 +177,7 @@ static void generateYieldCntsForThenBlock(
     parentArgSize = parentForOp.getBody()->getArguments().size();
     // Find accumArgId for preOrderOps[0] in parentForOp.
     accumArgId = getAccumArgIdx(parentForOp, preOrderOps[0],
-                                regionsWithChannels, config, reuseGroupIdx);
+                                regionsWithChannels, config, -1);
     parentTCnts =
         getAccumCnts(parentForOp.getOperation(), regionsWithChannels, config);
   }
@@ -193,7 +189,7 @@ static void generateYieldCntsForThenBlock(
   // corresponding accumCnts, in the same order.
   for (unsigned i = 0; i < tCnts; ++i) {
     // Handle each accumCnt for "op".
-    Value endAccum = regionOp->getResult(numRes - tCnts + i);
+    Value endAccum = regionOp->getResult(numRes - tCntsTotal + i);
     thenYields.push_back(endAccum);
 
     // Find the corresponding accumArgId from parentForOp.
@@ -213,6 +209,116 @@ static void generateYieldCntsForThenBlock(
       elseVal.dump();
     });
   }
+}
+
+// Increment by one for unique channels.
+static Value generateYieldCntsForForOp(scf::ForOp forOp, unsigned accumArgId) {
+  Operation *yieldOp = forOp.getBody()->getTerminator();
+  Value arg = forOp.getBody()->getArgument(accumArgId);
+  OpBuilderWithAsyncTaskIds builder(forOp->getContext());
+  builder.setAsynTaskIdsFromArray(getNestedAsyncTaskIds(forOp));
+  builder.setInsertionPoint(yieldOp);
+  auto loc = forOp.getLoc();
+  Value one = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 64);
+  Value endAccum = builder.createWithAsyncTaskIds<arith::AddIOp>(loc, arg, one);
+  return endAccum;
+}
+
+static bool isRegionOp(Operation *op) {
+  return isa<scf::ForOp>(op) || isa<scf::IfOp>(op);
+}
+
+// op is in chList, chList is the list of operations under a ctrlOp enclosing
+// channels for a given reuse group. Elements in chList can be region op or
+// non-region op.
+// Returns AccumCnt before or after op for a given reuse group.
+Value getAccumForReuseGroup(Operation *op, SmallVector<Operation *> &chList,
+                            DenseSet<Operation *> &regionsWithChannels,
+                            ReuseConfig *config, int reuseGroupIdx,
+                            bool before) {
+  // If op is a region op, we can get its result at the matching ArgIdx.
+  // Otherwise, we need to find the last region op prior to op and accumulate
+  // from there.
+  int opIdx = -1, idx = 0, lastRegionIdx = -1;
+  for (auto *ch : chList) {
+    if (isRegionOp(ch) && (!before || ch != op))
+      // If checking before the op, we should exclude op.
+      lastRegionIdx = idx;
+    if (op == ch) {
+      opIdx = idx;
+      break;
+    }
+    ++idx;
+  }
+  assert(opIdx >= 0);
+  if (before && lastRegionIdx >= 0 && lastRegionIdx == opIdx - 1) {
+    auto *lastOp = chList[lastRegionIdx];
+    auto numRes = lastOp->getNumResults();
+    unsigned tCnts = getAccumCnts(lastOp, regionsWithChannels, config);
+    auto reuseArgIdx =
+        getReuseAccumArgIdx(lastOp, regionsWithChannels, config, reuseGroupIdx);
+    return lastOp->getResult(numRes - tCnts + reuseArgIdx);
+  }
+  if (!before && lastRegionIdx == opIdx) {
+    auto reuseArgIdx =
+        getReuseAccumArgIdx(op, regionsWithChannels, config, reuseGroupIdx);
+    auto numRes = op->getNumResults();
+    unsigned tCnts = getAccumCnts(op, regionsWithChannels, config);
+    return op->getResult(numRes - tCnts + reuseArgIdx);
+  }
+  Operation *ctrlOp = op->getParentOp();
+  OpBuilderWithAsyncTaskIds builder(ctrlOp->getContext());
+  builder.setAsynTaskIdsFromArray(getNestedAsyncTaskIds(op));
+  builder.setInsertionPoint(op);
+  if (lastRegionIdx >= 0) {
+    auto *lastRegionOp = chList[lastRegionIdx];
+    // Get the argment idx for accumCnt associated with lastRegionOp for the
+    // specific reuse group.
+    auto reuseArgIdx = getReuseAccumArgIdx(lastRegionOp, regionsWithChannels,
+                                           config, reuseGroupIdx);
+    auto numRes = lastRegionOp->getNumResults();
+    unsigned tCnts = getAccumCnts(lastRegionOp, regionsWithChannels, config);
+    Value res = lastRegionOp->getResult(numRes - tCnts + reuseArgIdx);
+    auto loc = op->getLoc();
+    // From the last region op, accumulate till before or after "op".
+    Value lit = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
+        loc, before ? opIdx - lastRegionIdx - 1 : opIdx - lastRegionIdx, 64);
+    Value endAccum =
+        builder.createWithAsyncTaskIds<arith::AddIOp>(loc, res, lit);
+    return endAccum;
+  }
+  // Here lastRegionIdx < 0: we need to start with the accumCnt value at the
+  // start of ctrlOp.
+  if (auto forOp = dyn_cast<scf::ForOp>(ctrlOp)) {
+    auto argIdx = getAccumArgIdx(forOp, nullptr, regionsWithChannels, config,
+                                 reuseGroupIdx);
+    auto numArgs = forOp.getBody()->getArguments().size();
+    auto tCnts =
+        getAccumCnts(forOp.getOperation(), regionsWithChannels, config);
+    Value arg = forOp.getBody()->getArgument(numArgs - tCnts + argIdx);
+    Value lit = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
+        forOp.getLoc(), before ? opIdx : opIdx + 1, 64);
+    Value endAccum =
+        builder.createWithAsyncTaskIds<arith::AddIOp>(forOp.getLoc(), arg, lit);
+    return endAccum;
+  }
+  if (isa<scf::IfOp>(ctrlOp)) {
+    // Find parentChList in parent scope and get value for the op
+    // right before ctrlOp in parentChList.
+    SmallVector<Operation *> parentChList;
+    getReuseChannels(config->getGroup(reuseGroupIdx), ctrlOp->getParentOp(),
+                     parentChList);
+    Value startOfIf = getAccumForReuseGroup(
+        ctrlOp, parentChList, regionsWithChannels, config, reuseGroupIdx, true);
+    Value lit = builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
+        ctrlOp->getLoc(), before ? opIdx : opIdx + 1, 64);
+    Value endAccum = builder.createWithAsyncTaskIds<arith::AddIOp>(
+        ctrlOp->getLoc(), startOfIf, lit);
+    return endAccum;
+  }
+  assert(isa<tt::FuncOp>(ctrlOp));
+  return builder.createWithAsyncTaskIds<arith::ConstantIntOp>(
+      op->getLoc(), before ? opIdx : opIdx + 1, 64);
 }
 
 scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
@@ -317,38 +423,60 @@ scf::IfOp rewriteIfOp(scf::IfOp ifOp, SmallVector<Operation *> &taskTopOps,
       break;
     }
   }
-  // TODO: refactor helper to get valueForIf and valueForElse. We need to
-  // handle yield values for accumCnts of unique channels and reuse channels.
+  // We need to handle yield values for accumCnts of unique channels and reuse
+  // channels.
   if (hasDirectChannel) {
     // Set up value for thenYield and elseYield for accumCnt associated with
     // "newIfOp".
     Value endAccum, endAccumElse;
     generateYieldCntsForIfOp(newIfOp, endAccum, endAccumElse,
-                             regionsWithChannels, config, -1, ifBuilder,
+                             regionsWithChannels, config, ifBuilder,
                              elseBuilder);
     ifYieldOperands.push_back(endAccum);
     elseYieldOperands.push_back(endAccumElse);
-    LLVM_DEBUG({
-      LDBG("Update yieldOperands ");
-      endAccum.dump();
-      endAccumElse.dump();
-    });
   }
 
-  // Go through ops in thenBlock.
+  // Go through region ops in thenBlock.
   for (auto *op : opList) {
     if (!enclosingAChannel(op, regionsWithChannels))
       continue;
     SmallVector<Value> thenYields;
     SmallVector<Value> elseYields;
     generateYieldCntsForThenBlock(newIfOp, op, thenYields, elseYields,
-                                  regionsWithChannels, config, -1, ifBuilder,
+                                  regionsWithChannels, config, ifBuilder,
                                   elseBuilder);
     for (auto V : thenYields)
       ifYieldOperands.push_back(V);
     for (auto V : elseYields)
       elseYieldOperands.push_back(V);
   }
+  // Handle reuse groups.
+  for (unsigned idx = 0; idx < config->getGroupSize(); ++idx) {
+    // Find channels of reuse group that are inside ifOp. If the channel is
+    // directly in ifOp, add the channel's DstOp, otherwise add the region Op
+    // that is directly in ifOp.
+    SmallVector<Operation *> chList;
+    getReuseChannels(config->getGroup(idx), newIfOp.getOperation(), chList);
+    if (chList.empty())
+      continue;
+    Operation *lastOp = chList.back();
+    Value prevAccum;
+    {
+      SmallVector<Operation *> parentChList;
+      Operation *parentOp = newIfOp->getParentOp();
+      // Get a list of ops directly under parentOp that contain channels in the
+      // reuse group.
+      getReuseChannels(config->getGroup(idx), parentOp, parentChList);
+      prevAccum = getAccumForReuseGroup(newIfOp.getOperation(), parentChList,
+                                        regionsWithChannels, config, idx, true);
+    }
+    // Find accumValue after lastOp.
+    auto thenYield = getAccumForReuseGroup(lastOp, chList, regionsWithChannels,
+                                           config, idx, false);
+    ifYieldOperands.push_back(thenYield);
+    elseYieldOperands.push_back(prevAccum);
+  }
+
   // Update Yields.
   updateYield(newIfOp.thenYield(), ifYieldOperands);
   updateYield(newIfOp.elseYield(), elseYieldOperands);
@@ -519,6 +647,27 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
     }
     initialAccums.push_back(startAccum);
   }
+  // Handle reuse groups.
+  for (unsigned idx = 0; idx < config->getGroupSize(); ++idx) {
+    // Find channels of reuse group that are inside forOp. If the channel is
+    // directly in forOp, add the channel's DstOp, otherwise add the region Op
+    // that is directly in forOp.
+    SmallVector<Operation *> chList;
+    getReuseChannels(config->getGroup(idx), origForOp.getOperation(), chList);
+    if (chList.empty())
+      continue;
+
+    // Find prevAccum right before the forOp.
+    Value prevAccum;
+    SmallVector<Operation *> parentChList;
+    Operation *parentOp = origForOp->getParentOp();
+    // Get a list of ops directly under parentOp that contain channels in the
+    // reuse group.
+    getReuseChannels(config->getGroup(idx), parentOp, parentChList);
+    prevAccum = getAccumForReuseGroup(origForOp.getOperation(), parentChList,
+                                      regionsWithChannels, config, idx, true);
+    initialAccums.push_back(prevAccum);
+  }
 
   scf::ForOp newForOp = createNewLoop(origForOp, parentForOp, initialAccums);
   LLVM_DEBUG({
@@ -569,15 +718,8 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
   // If there is a channel directly in forOp, it should be the first accumCnt.
   for (auto *op : regionsWithChannels) {
     if (newForOp.getOperation() == op) {
+      Value endAccum = generateYieldCntsForForOp(newForOp, accumArgId);
       Value arg = newForOp.getBody()->getArgument(accumArgId);
-      OpBuilderWithAsyncTaskIds builder(newForOp->getContext());
-      builder.setAsynTaskIdsFromArray(getNestedAsyncTaskIds(newForOp));
-      builder.setInsertionPoint(yieldOp);
-      auto loc = newForOp.getLoc();
-      Value one =
-          builder.createWithAsyncTaskIds<arith::ConstantIntOp>(loc, 1, 64);
-      Value endAccum =
-          builder.createWithAsyncTaskIds<arith::AddIOp>(loc, arg, one);
 
       // Make sure accumCnt = argValue + 1, increment by 1.
       // In createNewLoop, yieldOp yields the argument value directly, it is
@@ -617,6 +759,24 @@ scf::ForOp createNewLoopWrapper(scf::ForOp origForOp,
       ++accumArgId;
     }
   }
+
+  // Handle reuse groups.
+  for (unsigned idx = 0; idx < config->getGroupSize(); ++idx) {
+    // Find channels of reuse group that are inside forOp. If the channel is
+    // directly in forOp, add the channel's DstOp, otherwise add the region Op
+    // that is directly in forOp.
+    SmallVector<Operation *> chList;
+    getReuseChannels(config->getGroup(idx), newForOp.getOperation(), chList);
+    if (chList.empty())
+      continue;
+    Operation *lastCh = chList.back();
+    auto forYield = getAccumForReuseGroup(lastCh, chList, regionsWithChannels,
+                                          config, idx, false);
+    Value arg = newForOp.getBody()->getArgument(accumArgId);
+    yieldOp->replaceUsesOfWith(arg, forYield);
+    ++accumArgId;
+  }
+
   LLVM_DEBUG({
     LDBG("-- after all replacing ");
     newForOp.dump();

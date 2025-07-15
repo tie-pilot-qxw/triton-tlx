@@ -45,12 +45,17 @@ public:
 
 struct ReuseGroup {
   std::vector<unsigned> channelIDs;
+  std::vector<Channel *> channels;
 };
 
 struct ReuseConfig {
   // Each ReuseGroup
   std::vector<ReuseGroup> groups;
   unsigned getGroupSize() { return groups.size(); }
+  ReuseGroup *getGroup(unsigned idx) {
+    assert(idx < groups.size());
+    return &groups[idx];
+  }
 };
 
 struct CommChannel {
@@ -102,10 +107,18 @@ unsigned getAccumCnts(Operation *ctrlOp,
                       ReuseConfig *config);
 
 // We pass in groupIdx, if it is -1, we are getting accumCnt for a channel
-// not in a reuse group, directly in ctrlOp.
+// not in a reuse group, directly in ctrlOp. ctrlOp can be null if
+// reuseGroupIdx >= 0.
 unsigned getAccumArgIdx(scf::ForOp parentForOp, Operation *ctrlOp,
                         const DenseSet<Operation *> &regionsWithChannels,
                         ReuseConfig *config, int reuseGroupIdx);
+
+void getReuseChannels(ReuseGroup *gruop, Operation *regionOp,
+                      SmallVector<Operation *> &chList);
+// Skip the accumCnt for unique channels.
+unsigned getReuseAccumArgIdx(Operation *regionOp,
+                             const DenseSet<Operation *> &regionsWithChannels,
+                             ReuseConfig *config, int reuseGroupIdx);
 
 SmallVector<Operation *>
 getTaskTopRegion(triton::FuncOp funcOp, const SmallVector<Channel *> &channels);
