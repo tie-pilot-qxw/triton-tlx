@@ -20,9 +20,8 @@ def _create_tmem_compatible_tensor_layout_encoding(
     num_ctas = builder.options.num_ctas
     assert num_ctas > 0, "tmem load requires num_ctas > 0"
     threads_per_warp = 32
-    return builder.make_default_tmem_compatible_tensor_layout_encoding(list(tensor.shape),
-                                                                        tensor.dtype.to_ir(builder), module_num_warps,
-                                                                        threads_per_warp, num_ctas)
+    return builder.make_default_tmem_compatible_tensor_layout_encoding(list(tensor.shape), tensor.dtype.to_ir(builder),
+                                                                       module_num_warps, threads_per_warp, num_ctas)
 
 
 @tl.builtin
@@ -60,14 +59,8 @@ To bypass, rewrite it to `local_alloc(..., num=tl.constexpr(2))` or `local_alloc
     elem_type = dtype.to_ir(_semantic.builder)
     if layout is None:
         if storage == tlx.storage_kind.smem:
-            layout = tlx.nv_mma_shared_layout_encoding(
-                    shape=shape, 
-                    order=[1, 0], 
-                    elemType=dtype,
-                    numCTAsPerCGA=[1, 1], 
-                    numCTASplit=[1, 1], 
-                    numCTAOrder=[1, 1],
-                    fp4Padded=False)
+            layout = tlx.nv_mma_shared_layout_encoding(shape=shape, order=[1, 0], elemType=dtype, numCTAsPerCGA=[1, 1],
+                                                       numCTASplit=[1, 1], numCTAOrder=[1, 1], fp4Padded=False)
             layout_handle = _semantic.builder.make_nv_mma_shared_encoding_attr(
                 [int(x) for x in layout.shape],
                 layout.order,
@@ -94,10 +87,10 @@ To bypass, rewrite it to `local_alloc(..., num=tl.constexpr(2))` or `local_alloc
     else:
         tensor_handle = _semantic.builder.create_tmem_alloc(full_shape, elem_type, layout_handle)
 
-    block_type = tl.block_type(dtype, unwrapped_shape)
     base_tensor = tlx.buffered_tensor(
         tensor_handle,
-        block_type,
+        dtype,
+        unwrapped_shape,
         storage,
         layout,
     )
@@ -116,17 +109,17 @@ def local_view(
     """
     buffer_idx = _semantic._convert_elem_to_ir_value(buffer_idx, require_i64=False)
     base_tensor = local_allocated_buffers.base_tensor
-    view_shape = base_tensor.shape
-    view_type = tl.block_type(base_tensor.type.element_ty, view_shape)
+    view_shape = base_tensor.type.shape
     view_handle = _semantic.builder.create_memdesc_subview(base_tensor.handle, buffer_idx)
     if isinstance(local_allocated_buffers, tlx.mbarriers):
         return tlx.mbarrier(view_handle, )
     else:
         return tlx.buffered_tensor(
             view_handle,
-            view_type,
-            base_tensor.storage,
-            base_tensor.layout,
+            base_tensor.type.scalar,
+            view_shape,
+            base_tensor.type.storage,
+            base_tensor.type.layout,
         )
 
 
@@ -146,15 +139,15 @@ def subslice(
     :param size: the size of the subslice, in terms of number of elements
     """
     # this is for TMEM subslice
-    assert local_allocated_buffer.storage == tlx.storage_kind.tmem, "subslice is only supported for tmem"
+    assert local_allocated_buffer.type.storage == tlx.storage_kind.tmem, "subslice is only supported for tmem"
     assert isinstance(local_allocated_buffer.type, tl.block_type), "subslice src is not block type"
     subslice_shape = [dim for dim in local_allocated_buffer.type.shape[:-1]] + [size]
-    subslice_type = tl.block_type(local_allocated_buffer.type.element_ty, subslice_shape)
     return tlx.buffered_tensor(
         _semantic.builder.create_tmem_subslice(local_allocated_buffer.handle, offset, size),
-        subslice_type,
-        local_allocated_buffer.storage,
-        local_allocated_buffer.layout,
+        local_allocated_buffer.type.element_ty,
+        subslice_shape,
+        local_allocated_buffer.type.storage,
+        local_allocated_buffer.type.layout,
     )
 
 
@@ -236,7 +229,7 @@ def local_load(
         _assert_blackwell_for_tmem(_semantic.builder.options.arch)
         tmem_compatible_layout_encoding = _create_tmem_compatible_tensor_layout_encoding(_semantic.builder, src)
         load_handle = _semantic.builder.create_tmem_load(src.handle, tmem_compatible_layout_encoding,
-                                                token.handle if token else None)
+                                                         token.handle if token else None)
         output = _semantic.builder.create_release_layout(load_handle)
         return tl.tensor(output, src.type)
 
@@ -274,13 +267,32 @@ def local_trans(input: tlx.buffered_tensor, dims: Tuple[int] = (1, 0), _semantic
         :param dims: The desired ordering of dimensions.  For example,
             :code:`(2, 1, 0)` reverses the order dims in a 3D tensor.
     """
-    if len(input.shape) != len(dims):
+    if len(input.type.shape) != len(dims):
         raise ValueError("permute dims must have the same length as input shape")
     if sorted(tl._unwrap_if_constexpr(d) for d in dims) != list(range(len(dims))):
         raise ValueError(f"permute dims must be a permutation of 0, 1, ..., n-1, but were {dims}")
 
     permuted_handle = _semantic.builder.create_memdesc_trans(input.handle, dims)
     return input.make_permute(permuted_handle, dims)
+
+
+@tl.builtin
+def local_reinterpret(src: tlx.buffered_tensor, dtype: tl.dtype, _semantic=None) -> tlx.buffered_tensor:
+    """
+        Reinterpret the dtype of a buffered tensor. Currently only support TMEM.
+    """
+    assert isinstance(src, tlx.buffered_tensor) and src.type.storage == tlx.storage_kind.tmem and isinstance(
+        src.type.layout, tlx.tensor_memory_layout_encoding), "TLX local_reinterpret only supports TMEM"
+
+    reinterpreted_value_handle = _semantic.builder.create_memdesc_reinterpret(src.handle,
+                                                                              dtype.to_ir(_semantic.builder), src.shape)
+    return tlx.buffered_tensor(
+        reinterpreted_value_handle,
+        dtype,
+        src.shape,
+        src.type.storage,
+        src.type.layout,
+    )
 
 
 @tl.builtin
