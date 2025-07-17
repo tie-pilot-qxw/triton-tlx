@@ -591,6 +591,16 @@ static Operation *ProducerIsGen5(Operation *producerOp) {
   return nullptr;
 }
 
+static int channelInReuseGroup(Channel *channel, ReuseConfig *config) {
+  for (unsigned idx = 0; idx < config->getGroupSize(); idx++) {
+    for (auto *ch : config->getGroup(idx)->channels) {
+      if (channel == ch)
+        return idx;
+    }
+  }
+  return -1;
+}
+
 // channelsGroupedByConsumers: channels are grouped together.
 // Go through each group, check the first channel in the group, create a token
 // for each consumer taskId. Return a map that maps each channel + consumer
@@ -601,13 +611,20 @@ void createToken(
         &channelsGroupedByConsumers,
     const SmallVector<Channel *> &orderedChannels, triton::FuncOp funcOp,
     const DenseMap<Channel *, std::pair<Operation *, Operation *>> &copyOpMap,
-    DenseMap<Channel *, CommChannel> &tokenMap) {
+    DenseMap<Channel *, CommChannel> &tokenMap, ReuseConfig *config) {
   OpBuilder builder(funcOp);
   builder.setInsertionPointToStart(&(funcOp.getBody().front()));
   DenseMap<ttng::TCGen5MMAOp, Channel *> gen5Barriers;
   for (auto *key : orderedChannels) {
+    // Does channelsGroupedByConsumers work with reuse?
     auto it = channelsGroupedByConsumers.find(key);
     Channel *channel = it->second.front();
+    // For each reuse group, choose a representative channel.
+    int reuseGrp = channelInReuseGroup(channel, config);
+    if (reuseGrp >= 0) {
+      if (channel != config->getGroup(reuseGrp)->channels[0])
+        continue;
+    }
 
     CommChannel commChannel;
     auto producerOp = it->second.front()->getSrcOp();
@@ -690,6 +707,11 @@ void createToken(
     for (auto &c : it->second) {
       tokenMap[c] = commChannel;
     }
+    // For channels in the same reuse group as channel.
+    if (reuseGrp >= 0) {
+      for (auto *reuse : config->getGroup(reuseGrp)->channels)
+        tokenMap[reuse] = commChannel;
+    }
   }
 
   LLVM_DEBUG({
@@ -734,7 +756,8 @@ static ttng::TMEMAllocOp createTMemAlloc(OpBuilder &builder,
 // the buffer array will contain numBuffers.
 DenseMap<Channel *, Value> createBuffer(
     DenseMap<Channel *, SmallVector<Channel *>> &channelsGroupedByProducers,
-    const SmallVector<Channel *> &orderedChannels, triton::FuncOp funcOp) {
+    const SmallVector<Channel *> &orderedChannels, triton::FuncOp funcOp,
+    ReuseConfig *config) {
 
   DenseMap<Channel *, Value> bufferMap;
   MLIRContext *context = funcOp.getContext();
@@ -832,6 +855,15 @@ DenseMap<Channel *, Value> createBuffer(
     // Channels in the group share the same buffer.
     for (auto c : channels)
       bufferMap[c] = buffer;
+  }
+  unsigned groupId = 0;
+  for (unsigned idx = 0; idx < config->getGroupSize(); ++idx) {
+    for (auto *c : config->getGroup(idx)->channels) {
+      bufferMap[c].getDefiningOp()->setAttr(
+          "allocation.shareGroup",
+          IntegerAttr::get(IntegerType::get(context, 32), groupId));
+    }
+    ++groupId;
   }
   return bufferMap;
 }
@@ -1364,7 +1396,7 @@ void doCodePartition(triton::FuncOp &funcOp, unsigned numBuffers) {
 
   // Step 5: Create buffers. An array of buffers for each channel.
   DenseMap<Channel *, Value> bufferMap =
-      createBuffer(channelsGroupedByProducers, channels, funcOp);
+      createBuffer(channelsGroupedByProducers, channels, funcOp, &config);
   LLVM_DEBUG({
     LDBG("\n\nafter createBuffer");
     funcOp.dump();
@@ -1385,7 +1417,7 @@ void doCodePartition(triton::FuncOp &funcOp, unsigned numBuffers) {
   DenseMap<Channel *, DenseMap<int, Value>> barrierAllocMap;
   DenseMap<Channel *, CommChannel> tokenMap;
   createToken(channelsGroupedByConsumers, orderedChannels, funcOp, copyOpMap,
-              tokenMap);
+              tokenMap, &config);
   LLVM_DEBUG({
     LDBG("\n\nafter createToken");
     funcOp.dump();
