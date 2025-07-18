@@ -273,7 +273,8 @@ void init_triton_tlx_ir(py::module &&m) {
            })
       .def("create_tcgen5_dot",
            [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
-              mlir::Value &d, std::optional<Value> mBarrier) -> mlir::Value {
+              mlir::Value &d, std::optional<Value> pred,
+              std::vector<Value> mBarriers) -> mlir::Value {
              // try to find the TMEMAllocOp that created d
              ttng::TMEMAllocOp tmemAllocOp;
              auto value = d;
@@ -298,16 +299,15 @@ void init_triton_tlx_ir(py::module &&m) {
              }
 
              Value predTrue = self.create<arith::ConstantIntOp>(1, 1);
+             std::vector<Value> barrierPreds(mBarriers.size(), predTrue);
              auto tokType = self.getBuilder().getType<ttg::AsyncTokenType>();
              return self
                  .create<ttng::TCGen5MMAOp>(
                      tokType, a, b, d, tmemAllocOp.getToken(),
-                     predTrue /*useD*/, predTrue /*pred */, false /* two_ctas*/,
-                     mBarrier.has_value() ? ValueRange(mBarrier.value())
-                                          : ValueRange(),
-                     mBarrier.has_value()
-                         ? ValueRange(predTrue) /*barrier_preds*/
-                         : ValueRange())
+                     predTrue /*useD*/,
+                     pred.has_value() ? pred.value() : predTrue /*pred */,
+                     false /* two_ctas*/, ValueRange(mBarriers),
+                     ValueRange(barrierPreds))
                  .getToken();
            })
       .def("create_async_commit_group",
