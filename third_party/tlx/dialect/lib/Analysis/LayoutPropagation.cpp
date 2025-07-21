@@ -4,6 +4,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Support/LLVM.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -17,6 +18,7 @@
 
 using namespace mlir;
 using namespace mlir::dataflow;
+namespace ttg = ::mlir::triton::gpu;
 
 namespace mlir::triton::tlx {
 
@@ -57,22 +59,78 @@ LayoutEncoding LayoutEncoding::meet(const LayoutEncoding &lhs,
 // LayoutBackwardPropagation
 //===----------------------------------------------------------------------===//
 
+LogicalResult LayoutBackwardPropagation::visitRegionInReverse(Operation *op) {
+  for (Region &region : llvm::reverse(op->getRegions())) {
+    for (Block &block : llvm::reverse(region)) {
+      for (Operation &nestedOp : llvm::reverse(block)) {
+        SmallVector<LayoutEncodingLattice *> operands;
+        for (auto operand : nestedOp.getOperands())
+          operands.push_back(getLatticeElement(operand));
+        SmallVector<const LayoutEncodingLattice *> results;
+        for (const Value result : nestedOp.getResults())
+          results.push_back(getLatticeElement(result));
+        auto visitResult = visitOperation(&nestedOp, operands, results);
+        if (failed(visitResult))
+          return visitResult;
+      }
+    }
+  }
+  return success();
+}
+
 LogicalResult LayoutBackwardPropagation::visitOperation(
     Operation *op, ArrayRef<LayoutEncodingLattice *> operands,
     ArrayRef<const LayoutEncodingLattice *> results) {
-  if (auto requireLayoutOp = dyn_cast<triton::tlx::RequireLayoutOp>(op)) {
+  LDBG("Visiting operation " << *op << "\n");
+  if (isa<RegionBranchOpInterface, ttg::WarpSpecializePartitionsOp>(op))
+    return visitRegionInReverse(op);
 
+  // Transpose op needs to be handled specially. When flowing backwards through
+  // it, we need to update the layout encoding.
+  if (auto memDescTransOp = dyn_cast<ttg::MemDescTransOp>(op)) {
+    auto resultLattice = results[0];
+    if (auto mmaEncoding = dyn_cast<ttg::NVMMASharedEncodingAttr>(
+            resultLattice->getValue().getLayoutEncoding())) {
+      SmallVector<unsigned, 4> newOrder;
+      llvm::transform(memDescTransOp.getOrder(), std::back_inserter(newOrder),
+                      [](int32_t x) { return static_cast<unsigned>(x); });
+      auto newMmaEncoding = ttg::NVMMASharedEncodingAttr::get(
+          mmaEncoding.getContext(),
+          memDescTransOp.getSrc().getType().getShape(), newOrder,
+          mmaEncoding.getCTALayout(),
+          memDescTransOp.getSrc().getType().getElementType(),
+          mmaEncoding.getFp4Padded());
+      const auto updatedResultLayoutEncoding = LayoutEncoding(newMmaEncoding);
+      auto operandLattice = operands[0];
+      ChangeResult changed = operandLattice->meet(updatedResultLayoutEncoding);
+      propagateIfChanged(operandLattice, changed);
+    }
+    return success();
+  }
+
+  if (auto requireLayoutOp = dyn_cast<triton::tlx::RequireLayoutOp>(op)) {
     // Skip the layout propagation for registers. require_layout ops on tensor
     // types will be rewritten into convert_layout ops, and following passes
     // will handle them.
     if (isa<RankedTensorType>(requireLayoutOp.getType()))
       return success();
-
     Attribute layout = requireLayoutOp.getType().getEncoding();
     const auto layoutLattice = LayoutEncoding(layout);
-    for (auto operandLattice : operands) {
+    for (auto [operandLattice, operand] :
+         llvm::zip_equal(operands, requireLayoutOp->getOperands())) {
       ChangeResult changed = operandLattice->meet(layoutLattice);
       propagateIfChanged(operandLattice, changed);
+      if (auto arg = dyn_cast<BlockArgument>(operand)) {
+        if (auto warpSpecializePartitionsOp =
+                dyn_cast<ttg::WarpSpecializePartitionsOp>(
+                    requireLayoutOp->getParentOp())) {
+          auto warpSpecializeOp = warpSpecializePartitionsOp.getParentOp();
+          auto blockArgumentLattice = getLatticeElement(
+              warpSpecializeOp.getExplicitCaptures()[arg.getArgNumber()]);
+          ChangeResult changed = blockArgumentLattice->meet(layoutLattice);
+          propagateIfChanged(blockArgumentLattice, changed);
+        }
+      }
     }
     return success();
   }
@@ -91,7 +149,14 @@ LogicalResult LayoutBackwardPropagation::visitOperation(
   return success();
 }
 
-void LayoutBackwardPropagation::visitBranchOperand(OpOperand &operand) {}
+void LayoutBackwardPropagation::visitBranchOperand(OpOperand &operand) {
+  auto branchOp = operand.getOwner();
+  LDBG("Visiting branch op " << *branchOp << "\n");
+  if (isa<ttg::WarpSpecializeOp>(branchOp)) {
+    auto unused = visitRegionInReverse(branchOp);
+    (void)unused;
+  }
+}
 
 void LayoutBackwardPropagation::visitCallOperand(OpOperand &operand) {
   llvm_unreachable(

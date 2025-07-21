@@ -7,6 +7,7 @@
 #include "tlx/dialect/include/Analysis/LayoutPropagation.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Tools/Sys/GetEnv.hpp"
@@ -38,6 +39,8 @@ public:
   mlir::LogicalResult
   matchAndRewrite(RequireLayoutOp requireLayoutOp,
                   mlir::PatternRewriter &rewriter) const override {
+    if (!isa<RankedTensorType>(requireLayoutOp.getSrc().getType()))
+      return failure();
     auto convertLayoutOp = rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(
         requireLayoutOp, requireLayoutOp.getType(), requireLayoutOp.getSrc());
     return success();
@@ -91,22 +94,45 @@ public:
              op->getResultTypes()[0].isIntOrIndexOrFloat();
     };
 
+    auto getNewMemDescType = [&](ttg::MemDescType origType,
+                                 Attribute encoding) {
+      return ttg::MemDescType::get(
+          origType.getShape(), origType.getElementType(), encoding,
+          origType.getMemorySpace(), origType.getMutableMemory());
+    };
+
     funcOp.walk([&](mlir::Operation *op) {
       if (isa<tlx::RequireLayoutOp>(op) || isScalar(op))
         return WalkResult::advance();
 
+      if (auto partitionOp = dyn_cast<ttg::WarpSpecializePartitionsOp>(op)) {
+        for (Region &region : partitionOp->getRegions()) {
+          for (auto blockArg : region.getArguments()) {
+            auto lattice = solver.lookupState<LayoutEncodingLattice>(blockArg);
+            if (!lattice)
+              llvm_unreachable("Lattice not found.");
+            if (lattice->getValue().isUninitialized())
+              continue;
+            if (auto origType =
+                    dyn_cast<ttg::MemDescType>(blockArg.getType())) {
+              auto newType = getNewMemDescType(
+                  origType, lattice->getValue().getLayoutEncoding());
+              blockArg.setType(newType);
+            }
+          }
+        }
+        return WalkResult::advance();
+      }
+
       for (auto [i, result] : llvm::enumerate(op->getResults())) {
         auto *lattice = solver.lookupState<LayoutEncodingLattice>(result);
         if (!lattice)
-          continue;
-        // llvm_unreachable("Lattice not found.");
+          llvm_unreachable("Lattice not found.");
         if (lattice->getValue().isUninitialized())
           continue;
-        if (auto origType = dyn_cast<gpu::MemDescType>(result.getType())) {
-          auto newType = gpu::MemDescType::get(
-              origType.getShape(), origType.getElementType(),
-              lattice->getValue().getLayoutEncoding(),
-              origType.getMemorySpace(), origType.getMutableMemory());
+        if (auto origType = dyn_cast<ttg::MemDescType>(result.getType())) {
+          auto newType = getNewMemDescType(
+              origType, lattice->getValue().getLayoutEncoding());
           op->getResult(i).setType(newType);
         }
       }
