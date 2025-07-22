@@ -228,6 +228,11 @@ void init_triton_tlx_ir(py::module &&m) {
            [](TritonOpBuilder &self, Value barrier, Value numThreads) -> void {
              self.create<ttng::NamedBarrierArriveOp>(barrier, numThreads);
            })
+      .def("create_barrier_expect",
+           [](TritonOpBuilder &self, Value mbarrerLoc, int expectBytes,
+              Value pred) -> void {
+             self.create<ttng::BarrierExpectOp>(mbarrerLoc, expectBytes, pred);
+           })
       .def("create_tmem_alloc",
            [](TritonOpBuilder &self, std::vector<int64_t> shape,
               Type &elementType, Attribute &encoding) -> mlir::Value {
@@ -354,10 +359,9 @@ void init_triton_tlx_ir(py::module &&m) {
            })
       .def("create_async_TMA_load",
            [](TritonOpBuilder &self, Value desc, std::vector<Value> &coord,
-              Value mbarrier, Value result, CacheModifier cacheModifier,
-              EvictionPolicy evictionPolicy, bool isVolatile) -> void {
-             //  Value tmaPtr = self.create<ttng::TensorDescToTMAPtrOp>(desc);
-             Value pred = self.create<arith::ConstantIntOp>(1, 1);
+              Value mbarrier, Value pred, Value result,
+              CacheModifier cacheModifier, EvictionPolicy evictionPolicy,
+              bool isVolatile) -> void {
              self.create<ttng::AsyncTMACopyGlobalToLocalOp>(
                  desc, coord, mbarrier, result, pred, cacheModifier,
                  evictionPolicy, isVolatile);
@@ -365,7 +369,6 @@ void init_triton_tlx_ir(py::module &&m) {
       .def("create_async_TMA_store",
            [](TritonOpBuilder &self, Value desc, std::vector<Value> &coord,
               Value source) -> void {
-             //  Value tmaPtr = self.create<ttng::TensorDescToTMAPtrOp>(desc);
              self.create<ttng::AsyncTMACopyLocalToGlobalOp>(desc, coord,
                                                             source);
            });

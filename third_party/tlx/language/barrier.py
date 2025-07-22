@@ -24,6 +24,7 @@ def alloc_barriers(
 def barrier_expect_bytes(
     bar: tlx.mbarrier,
     size: tl.constexpr,
+    pred: tl.tensor = None,
     _semantic=None,
 ) -> None:
     """
@@ -31,7 +32,11 @@ def barrier_expect_bytes(
     """
 
     # TODO. add validator logics
-    _semantic.builder.create_barrier_expect(bar.handle, size.value)
+    if pred is None:
+        pred_handle = _semantic.builder.get_int1(True)
+    else:
+        pred_handle = pred.handle
+    _semantic.builder.create_barrier_expect(bar.handle, size.value, pred_handle)
 
 
 @tl.builtin
