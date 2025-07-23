@@ -660,12 +660,12 @@ def test_async_dot_blackwell(device):
         tlx.local_store(acc_tmem, acc_init, tlx.storage_kind.tmem)
 
         # no barrier, tcgen5 mma synchronous semantic, compiler auto inserts barrier and wait
-        tlx.async_dot(a_smem, b_smem, acc_tmem, mBarrier=None, out_dtype=OUT_DTYPE)
+        tlx.async_dot(a_smem, b_smem, acc_tmem, mBarriers=[], out_dtype=OUT_DTYPE)
 
         # given barrier, tcgen5 mma asynchronous semantic, need to explicitly wait for the barrier
         bars = tlx.alloc_barriers(tl.constexpr(1))
         bar = tlx.local_view(bars, 0)
-        tlx.async_dot(a_smem, b_smem, acc_tmem, mBarrier=bar, out_dtype=OUT_DTYPE)
+        tlx.async_dot(a_smem, b_smem, acc_tmem, mBarriers=[bar], out_dtype=OUT_DTYPE)
         tlx.barrier_wait(bar, tl.constexpr(0))
 
         # now result == a*b + a*b
@@ -745,7 +745,7 @@ def test_async_dot_blackwell_tmem_A(device):
         tlx.local_store(a_tmem, a_reg, tlx.storage_kind.tmem)
 
         # acc_tmem = acc_tmem + a_tmem * b_smem
-        tlx.async_dot(a_tmem, b_smem, acc_tmem, mBarrier=None, out_dtype=OUT_DTYPE)
+        tlx.async_dot(a_tmem, b_smem, acc_tmem, mBarriers=[], out_dtype=OUT_DTYPE)
         # load result from TMEM to Reg
         result = tlx.local_load(acc_tmem, tlx.storage_kind.tmem)
 
