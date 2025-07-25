@@ -32,7 +32,7 @@ def local_alloc(
     storage: tlx.storage_kind = tlx.storage_kind.smem,
     layout: Optional[tlx.shared_layout_encoding] = None,
     _semantic=None,
-) -> tlx.buffered_tensors:
+) -> tlx.buffered_tensor:
     """
     Allocates buffer in shared memory and return a view of the buffer.
     """
@@ -98,21 +98,20 @@ To bypass, rewrite it to `local_alloc(..., num=tl.constexpr(2))` or `local_alloc
     else:
         tensor_handle = _semantic.builder.create_tmem_alloc(full_shape, elem_type, layout_handle)
 
-    base_tensor = tlx.buffered_tensor(
+    return tlx.buffered_tensor(
         tensor_handle,
         dtype,
         unwrapped_shape,
+        unwrapped_num,
         storage,
         layout,
     )
-
-    return tlx.buffered_tensors(base_tensor, num)
 
 
 # overload declarations just to make linter happy
 @overload
 def local_view(
-    local_allocated_buffers: tlx.buffered_tensors,
+    local_allocated_buffers: tlx.buffered_tensor,
     buffer_idx: int,
     _builder=None,
 ) -> tlx.buffered_tensor:
@@ -121,7 +120,7 @@ def local_view(
 
 @overload
 def local_view(
-    local_allocated_buffers: tlx.mbarriers,
+    local_allocated_buffers: tlx.mbarrier,
     buffer_idx: int,
     _builder=None,
 ) -> tlx.mbarrier:
@@ -130,7 +129,7 @@ def local_view(
 
 @tl.builtin
 def local_view(
-    local_allocated_buffers: tlx.buffered_tensors | tlx.mbarriers,
+    local_allocated_buffers: tlx.buffered_tensor | tlx.mbarrier,
     buffer_idx: int,
     _semantic=None,
 ) -> tlx.buffered_tensor | tlx.mbarrier:
@@ -138,18 +137,17 @@ def local_view(
     Returns a subview of the buffer.
     """
     buffer_idx = _semantic._convert_elem_to_ir_value(buffer_idx, require_i64=False)
-    base_tensor = local_allocated_buffers.base_tensor
-    view_shape = base_tensor.type.shape
-    view_handle = _semantic.builder.create_memdesc_subview(base_tensor.handle, buffer_idx)
-    if isinstance(local_allocated_buffers, tlx.mbarriers):
-        return tlx.mbarrier(view_handle, )
+    view_handle = _semantic.builder.create_memdesc_subview(local_allocated_buffers.handle, buffer_idx)
+    if isinstance(local_allocated_buffers, tlx.mbarrier):
+        return tlx.mbarrier(view_handle, 1, local_allocated_buffers.type.layout)
     else:
         return tlx.buffered_tensor(
             view_handle,
-            base_tensor.type.scalar,
-            view_shape,
-            base_tensor.type.storage,
-            base_tensor.type.layout,
+            local_allocated_buffers.type.scalar,
+            local_allocated_buffers.shape,
+            0,
+            local_allocated_buffers.type.storage,
+            local_allocated_buffers.type.layout,
         )
 
 
@@ -176,6 +174,7 @@ def subslice(
         _semantic.builder.create_tmem_subslice(local_allocated_buffer.handle, offset, size),
         local_allocated_buffer.type.element_ty,
         subslice_shape,
+        local_allocated_buffer.type.num,
         local_allocated_buffer.type.storage,
         local_allocated_buffer.type.layout,
     )
@@ -263,8 +262,8 @@ def local_load(
         output = _semantic.builder.create_release_layout(load_handle)
         return tl.tensor(output, src.type)
 
-    return tl.tensor(_semantic.builder.create_local_load(src.handle, token.handle if token else None), src.type)
-
+    block_type = tl.block_type(src.type.element_ty, src.type.shape)
+    return tl.tensor(_semantic.builder.create_local_load(src.handle, token.handle if token else None), block_type)
 
 @tl.builtin
 def local_store(
@@ -325,6 +324,7 @@ def local_reinterpret(src: tlx.buffered_tensor, dtype: tl.dtype, shape: list[tl.
         reinterpreted_value_handle,
         dtype,
         shape,
+        src.type.num,
         src.type.storage,
         src.type.layout,
     )
@@ -352,7 +352,8 @@ def async_descriptor_load(
         pred_handle = _semantic.builder.get_int1(True)
     else:
         pred_handle = pred.handle
-    _semantic.builder.create_async_TMA_load(desc.handle, offsets, barrier.handle, pred_handle, result_handle, cache, eviction, False)
+    _semantic.builder.create_async_TMA_load(desc.handle, offsets, barrier.handle, pred_handle, result_handle, cache, eviction,
+                                   False)
 
 
 @tl.builtin
