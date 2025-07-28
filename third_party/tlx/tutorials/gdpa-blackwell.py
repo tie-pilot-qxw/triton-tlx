@@ -64,13 +64,56 @@ def _load_tma(bufIdx, phase, empty_bars, full_bars, buffers, desc, offset_1, off
     return view_smem
 
 
+# Barriers:
+#   producer_acquire uses the same barrier as consumer_release
+#   producer_commit uses the same barriers as consumer_wait
 @triton.jit
 def _do_dots():
-    # ConsumerWait for k, ProducerAcquire for qk
-    tlx.barrier_wait(wait_k)
-    tlx.barrier_wait(acquire_qk0)
-    tlx.async_dot(q0_view, k_view, qk0_view, mBarriers=[release_k, commit_qk0])
-    tlx.async_dot(q1_view, k_view, qk1_view, mBarriers=[release_k, commit_qk1])
+    # prologue
+    accm_cnt_k = 0
+    tlx.barrier_wait(consumer_q0)  # consumer wait for q0
+    tlx.barrier_wait(consumer_k)  # consumer wait for k
+    tlx.barrier_wait(producer_qk0)  # producer acquire for qk0
+    # Do we support use_acc for async_dot?
+    # producer commit for qk0
+    tlx.async_dot(q0_view, k_view, qk0_view, use_acc=False, mBarriers=[producer_commit_qk0])
+    tlx.barrier_wait(consumer_q1)  # consumer wait for q1
+    tlx.barrier_wait(producer_qk1)  # producer acquire for qk1
+    # consumer release for k, producer commit for qk1
+    tlx.async_dot(q1_view, k_view, qk1_view, use_acc=False, mBarriers=[consumer_release_k, producer_commit_qk1])
+
+    tlx.barrier_wait(consumer_v)  # consumer wait for v
+    tlx.barrier_wait(producer_o0)  # producer acquire for o0
+    tlx.barrier_wait(consumer_qk0)  # consumer wait for p0 due to reuse of p0 and qk0
+    tlx.async_dot(p0_view, v_view, o0_view, use_acc=False, mBarriers=[producer_commit_o0])
+
+    lo, hi = 0, klen
+    first = True
+    for start_n in range(lo, hi, BLOCK_N):
+        start_n = tl.multiple_of(start_n, BLOCK_N)
+        # q0 dot k
+        tlx.barrier_wait(consumer_k)  # consumer wait for k
+        # no need for acquiring qk0?
+        tlx.async_dot(q0_view, k_view, qk0_view, use_acc=False, mBarriers=[producer_commit_qk0])
+        # p1 dot v
+        tlx.barrier_wait(producer_o1)  # producer acquire for o1
+        tlx.barrier_wait(consumer_qk1)  # consumer wait for p1 due to reuse of p1 and qk1
+        # done using v from previous iteration
+        tlx.async_dot(p1_view, v_view, o1_view, use_acc=not first, mBarriers=[producer_commit_o1, consumer_release_v])
+        # q1 dot k, done using k for this iteration
+        tlx.async_dot(q1_view, k_view, qk1_view, use_acc=False, mBarriers=[consumer_release_k, producer_commit_qk1])
+        # p0 dot v
+        tlx.barrier_wait(consumer_v)  # consumer wait for v
+        tlx.barrier_wait(producer_o0)  # producer acquire for o0
+        tlx.async_dot(p0_view, v_view, o0_view, use_acc=True, mBarriers=[producer_commit_o0])
+        first = False
+    # epilogue
+    # commit/commit
+    tlx.barrier_wait(producer_o1)  # producer acquire for o1
+    tlx.barrier_wait(consumer_qk1)  # consumer wait for p1 due to reuse of p1 and qk1
+    # release p0, p1
+    tlx.async_dot(p1_view, v_view, o1_view, use_acc=not first,
+                  mBarriers=[producer_commit_o1, consumer_release_v, consumer_release_qk0, consumer_release_qk1])
     return
 
 
@@ -229,8 +272,7 @@ def gdpa_kernel_tma_ws_blackwell(
             for _ in range(0, tiles_per_sm):
                 begin_q, qlen = _compute_qlen(tile_idx, n_tile_num, Q_offsets, seq_index, SORT_BY_SEQ_LENGTH)
                 if start_m * BLOCK_M < qlen:
-                    # initialize offsets
-                    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
+                    _do_dots()
         with tlx.async_task(num_warps=1):  #load
             accum_count_q = 0
             accum_count_k = 0
@@ -504,7 +546,7 @@ configs.append(
 
 
 @triton.testing.perf_report(configs)
-def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, mode, provider, device=DEVICE):
+def bench_gdpa_attention(BATCH, H, N_CTX, HEAD_DIM, mode, provider, device=DEVICE):
     assert mode in ["fwd"]
     dtype = torch.float16
     if "triton" in provider:
@@ -525,20 +567,10 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, mode, provider, device=DEVI
             fn = lambda: o.backward(do, retain_graph=True)
         ms = triton.testing.do_bench(fn)
 
-    if provider == "flash":
-        qkv = torch.randn((BATCH, N_CTX, 3, H, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        fn = lambda: flash_attn_func(qkv)
-        if mode == "bwd":
-            o = fn()
-            do = torch.randn_like(o)
-            fn = lambda: o.backward(do, retain_graph=True)
-        ms = triton.testing.do_bench(fn)
     flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * HEAD_DIM
     total_flops = 2 * flops_per_matmul
-    if mode == "bwd":
-        total_flops *= 2.5  # 2.0(bwd) + 0.5(recompute)
     return total_flops * 1e-12 / (ms * 1e-3)
 
 
 print("Running benchmarks...")
-bench_flash_attention.run(show_plots=True, print_data=True)
+bench_gdpa_attention.run(show_plots=True, print_data=True)
