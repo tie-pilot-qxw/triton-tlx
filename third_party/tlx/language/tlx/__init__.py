@@ -5,6 +5,8 @@ from .barrier import *
 from .utility import *
 from .mma_ops import *
 
+from . import compiler
+
 __all__ = [
     # warp specialization ops
     "async_task",
@@ -12,6 +14,7 @@ __all__ = [
     "async_dot",
     # local buffer ops
     "buffered_tensor",  # type
+    "compiler",
     "local_alloc",
     "local_view",
     "local_load",
