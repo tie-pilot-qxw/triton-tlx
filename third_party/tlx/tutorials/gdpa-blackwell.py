@@ -528,10 +528,10 @@ def gdpa_kernel_tma_ws_blackwell(
                         phase = (accum_cnt // NUM_BUFFERS_O) & 1
                         # consumer wait of o0: producer_commit
                         consumer_o0_view = tlx.local_view(producer_commit_o0, bufIdx)
-                        tlx.wait_barrier(consumer_o0_view, phase)
+                        tlx.barrier_wait(consumer_o0_view, phase)
                         # consumer wait of o1
                         consumer_o1_view = tlx.local_view(producer_commit_o1, bufIdx)
-                        tlx.wait_barrier(consumer_o1_view, phase)
+                        tlx.barrier_wait(consumer_o1_view, phase)
                         accum_cnt += 1
 
                     bufIdx_o_outer, phase_o_outer = _get_bufidx_phase(accum_cnt_outer, NUM_BUFFERS_O)
