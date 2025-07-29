@@ -5,9 +5,9 @@ import torch
 import triton
 import triton.language as tl
 import triton.tlx.language as tlx
-from triton.tools.tensor_descriptor import TensorDescriptor
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
+
 
 def get_cuda_autotune_config():
     return [
@@ -15,24 +15,19 @@ def get_cuda_autotune_config():
             {
                 "BLOCK_SIZE_M": BM,
                 "BLOCK_SIZE_N": BN,
-                "BLOCK_SIZE_K": BK,
-                "GROUP_SIZE_M": 8,
                 "NUM_SMEM_BUFFERS": s,
                 "NUM_TMEM_BUFFERS": t,
             },
             num_warps=4,
             num_stages=1,
-            pre_hook=matmul_tma_set_block_size_hook,
-        )
-        for BM in [128]
-        for BN in [128, 256]
-        for BK in [64, 128]
-        for s in [2, 3, 4]
-        for t in [2, 3]
-        for subtile in [True]
+        ) for BM in [128] for BN in [128] for s in [2, 3, 4] for t in [2, 3]
     ]
 
 
+## Overall warpspec configuration
+## 4 partitions:
+##   default is activation0 with 4 warps, partition0 is activatation1 with 4 warps
+##   partition1 is gemm, partition 2 is load, partition 3 is epilogue/store
 @triton.jit
 def _compute_qlen(tile_idx, n_tile_num, Q_offsets, seq_index, SORT_BY_SEQ_LENGTH: tl.constexpr):
     off_hz = tile_idx // n_tile_num
@@ -49,18 +44,35 @@ def _compute_qlen(tile_idx, n_tile_num, Q_offsets, seq_index, SORT_BY_SEQ_LENGTH
 
 
 @triton.jit
+def _get_bufidx_phase(accum_cnt, NUM_BUFFERS):
+    bufIdx = accum_cnt % NUM_BUFFERS
+    phase = (accum_cnt // NUM_BUFFERS) & 1
+    return bufIdx, phase
+
+
+@triton.jit
+def _reinterpret(qk_buf, bufIdx_qk):
+    qk_view = tl.local_view(qk_buf, bufIdx_qk)
+    p_view = tlx.local_reinterpret(qk_view, tl.float16)
+    return p_view
+
+
+@triton.jit
 def _load_tma(bufIdx, phase, empty_bars, full_bars, buffers, desc, offset_1, offset_0, num_bytes):
-    empty = tlx.local_view(empty_bars, bufIdx)
-    tlx.barrier_wait(empty, phase ^ 1)
-    full = tlx.local_view(full_bars, bufIdx)
-    tlx.barrier_expect_bytes(full, num_bytes)
-    view_smem = tlx.local_view(buffers, bufIdx)
-    tlx.async_descriptor_load(desc, view_smem, [
+    # producer acquire
+    empty_view = tlx.local_view(empty_bars, bufIdx)
+    tlx.barrier_wait(empty_view, phase ^ 1)
+    # barrier for producer commit
+    full_view = tlx.local_view(full_bars, bufIdx)
+    tlx.barrier_expect_bytes(full_view, num_bytes)
+    smem_view = tlx.local_view(buffers, bufIdx)
+    tlx.async_descriptor_load(desc, smem_view, [
         (offset_1).to(tl.int32),
         (offset_0).to(tl.int32),
     ], full)
 
     return view_smem
+
 
 # Block sizes: 128 x 128
 # Barriers:
@@ -74,71 +86,154 @@ def _load_tma(bufIdx, phase, empty_bars, full_bars, buffers, desc, offset_1, off
 #   p0, p1: sharing tmem spaces, and barriers with qk0, qk1 (consumers)
 #   o0, o1
 @triton.jit
-def _do_dots(consumer_q0, consumer_q1, consumer_k, consumer_v, producer_qk0, producer_commit_qk0,
-             producer_qk1, producer_commit_qk1, consumer_release_k, consumer_release_v, producer_o0,
-             producer_commit_o0, producer_o1, producer_commit_o1):
+def _do_dots(consumer_q0, consumer_q1, consumer_k, consumer_v, producer_qk0, producer_commit_qk0, producer_qk1,
+             producer_commit_qk1, consumer_release_k, consumer_release_v, producer_o0, producer_commit_o0, producer_o1,
+             producer_commit_o1, accum_cnt_q, accum_cnt_k, accum_cnt_qk, accum_cnt_outer):
     # prologue
-    accum_cnt_k = 0
-    consumer_q0_view = tlx.local_view(consumer_q0, bufIdx_q)
-    consumer_k_view = tlx.local_view(consumer_k, bufIdx)
-    tlx.barrier_wait(consumer_q0_view)  # consumer wait for q0
-    tlx.barrier_wait(consumer_k_view)  # consumer wait for k
-    tlx.barrier_wait(producer_qk0_view)  # producer acquire for qk0
-    # Do we support use_acc for async_dot?
-    # producer commit for qk0
-    tlx.async_dot(q0_view, k_view, qk0_view, use_acc=False, mBarriers=[producer_commit_qk0])
-    tlx.barrier_wait(consumer_q1)  # consumer wait for q1
-    tlx.barrier_wait(producer_qk1)  # producer acquire for qk1
-    # consumer release for k, producer commit for qk1
-    tlx.async_dot(q1_view, k_view, qk1_view, use_acc=False, mBarriers=[consumer_release_k, producer_commit_qk1])
+    bufIdx_q, phase_q = _get_bufidx_phase(accum_cnt_q, NUM_BUFFERS_Q)
+    bufIdx_k, phase_k = _get_bufidx_phase(accum_cnt_k, NUM_BUFFERS_K)
+    bufIdx_qk, phase_qk = _get_bufidx_phase(accum_cnt_qk, NUM_BUFFERS_QK)
+    accum_cnt_qk1 = accum_cnt_qk
 
-    tlx.barrier_wait(consumer_v)  # consumer wait for v
+    consumer_q0_view = tlx.local_view(consumer_q0, bufIdx_q)
+    consumer_k_view = tlx.local_view(consumer_k, bufIdx_k)
+    producer_qk0_view = tlx.local_view(producer_qk0, bufIdx_qk)
+    tlx.barrier_wait(consumer_q0_view, phase_q)  # consumer wait for q0
+    tlx.barrier_wait(consumer_k_view, phase_k)  # consumer wait for k
+    tlx.barrier_wait(producer_qk0_view, phase_qk)  # producer acquire for qk0
+    # producer commit for qk0
+    q0_view = tlx.local_view(q0_buf, bufIdx_q)
+    k_view = tlx.local_view(k_buf, bufIdx_k)
+    qk0_view = tlx.local_view(qk0_buf, bufIdx_qk)
+    producer_commit_qk0_view = tlx.local_view(producer_commit_qk0, bufIdx_qk)
+    tlx.async_dot(q0_view, k_view, qk0_view, use_acc=False, mBarriers=[producer_commit_qk0_view])
+    accum_cnt_qk += 1
+
+    consumer_q1_view = tlx.local_view(consumer_q1, bufIdx_q)
+    producer_qk1_view = tlx.local_view(producer_qk1, bufIdx_qk)
+    tlx.barrier_wait(consumer_q1_view, phase_q)  # consumer wait for q1
+    tlx.barrier_wait(producer_qk1_view, phase_qk)  # producer acquire for qk1
+    # consumer release for k, producer commit for qk1
+    q1_view = tlx.local_view(q1_buf, bufIdx_q)
+    qk1_view = tlx.local_view(qk1_buf, bufIdx_qk)
+    consumer_release_k_view = tlx.local_view(consumer_release_k, bufIdx_k)
+    producer_commit_qk1_view = tlx.local_view(producer_commit_qk1, bufIdx_qk)
+    tlx.async_dot(q1_view, k_view, qk1_view, use_acc=False,
+                  mBarriers=[consumer_release_k_view, producer_commit_qk1_view])
+    accum_cnt_qk1 += 1
+
+    consumer_v_view = tlx.local_view(consumer_v, bufIdx_k)
+    tlx.barrier_wait(consumer_v_view, phase_v)  # consumer wait for v
     # need to acquire o0 to make sure epilogue is done, this is needed for each outer loop
-    tlx.barrier_wait(producer_o0, phase_outer)  # producer acquire for o0
+    bufIdx_o_outer, phase_o_outer = _get_bufidx_phase(accum_cnt_outer, NUM_BUFFERS_O)
+    producer_o0_view = tlx.local_view(producer_o0, bufIdx_o_outer)
+    producer_o1_view = tlx.local_view(producer_o1, bufIdx_o_outer)
+    tlx.barrier_wait(producer_o0_view, phase_o_outer)  # producer acquire for o0
     # For reuse of qk0 and p0, we can simplify the barriers
     #   activation partition: consumer wait for qk0, ... update p, producer commit of p0
     #   dot partition: producer commit of qk0, ..., consumer wait for p0 (use the same barrier as producer_qk0)
-    tlx.barrier_wait(consumer_qk0)  # consumer wait for p0 due to reuse of p0 and qk0
-    tlx.async_dot(p0_view, v_view, o0_view, use_acc=False, mBarriers=[producer_commit_o0])
+    bufIdx_p, phase_p = _get_bufidx_phase(accum_cnt_qk, NUM_BUFFERS_QK)
+    consumer_p0_view = tlx.local_view(producer_qk0, bufIdx_p)
+    tlx.barrier_wait(consumer_p0_view, phase_p)  # consumer wait for p0 due to reuse of p0 and qk0
+    # reinterpret qk0 as p0
+    p0_view = _reinterpret(qk0_buf, bufIdx_qk)
+    bufIdx_o, phase_o = _get_bufidx_phase(accum_cnt_k, NUM_BUFFERS_O)
+    producer_commit_o0_view = tlx.local_view(producer_commit_o0, bufIdx_o)
+    o0_view = tlx.local_view(o0_buf, bufIdx_o)
+    v_view = tlx.local_view(v_buf, bufIdx_k)
+    tlx.async_dot(p0_view, v_view, o0_view, use_acc=False, mBarriers=[producer_commit_o0_view])
+    accum_cnt_o1 = accum_cnt_k
 
     lo, hi = 0, klen
     first = True
-    mma_iters = (hi -lo) // BLOCK_N
+    mma_iters = (hi - lo) // BLOCK_N
+    accum_cnt_k += 1
+    accum_cnt_qk += 1
     for _ in range(mma_iters - 1):
+        bufIdx_k, phase_k = _get_bufidx_phase(accum_cnt_k, NUM_BUFFERS_K)
+        bufIdx_qk, phase_qk = _get_bufidx_phase(accum_cnt_qk, NUM_BUFFERS_QK)
+
         # q0 dot k
-        tlx.barrier_wait(consumer_k)  # consumer wait for k
-        # no need for acquiring qk0?
-        tlx.async_dot(q0_view, k_view, qk0_view, use_acc=False, mBarriers=[producer_commit_qk0])
-        # p1 dot v
-        tlx.barrier_wait(producer_o1, phase_outer, first)  # producer acquire for o1, only needed for first iteration
-        tlx.barrier_wait(producer_qk1)  # consumer wait for p1 use producer_qk1 due to reuse
+        consumer_k_view = tlx.local_view(consumer_k, bufIdx_k)
+        tlx.barrier_wait(consumer_k_view, phase_k)  # consumer wait for k
+        k_view = tlx.local_view(k_buf, bufIdx_k)
+        qk0_view = tlx.local_view(qk0_buf, bufIdx_qk)
+        producer_commit_qk0_view = tlx.local_view(producer_commit_qk0, bufIdx_qk)
+        tlx.async_dot(q0_view, k_view, qk0_view, use_acc=False, mBarriers=[producer_commit_qk0_view])
+
+        # p1 dot v for previous iteration
+        bufIdx_qk1, phase_qk1 = _get_bufidx_phase(accum_cnt_qk1, NUM_BUFFERS_QK)
+        consumer_p1_view = tlx.local_view(producer_qk1, bufIdx_qk1)
+        tlx.barrier_wait(producer_o1_view, phase_o_outer,
+                         first)  # producer acquire for o1, only needed for first iteration
+        tlx.barrier_wait(consumer_p1_view, phase_qk1)  # consumer wait for p1 use producer_qk1 due to reuse
         # done using v from previous iteration
-        tlx.async_dot(p1_view, v_view, o1_view, use_acc=not first, mBarriers=[producer_commit_o1, consumer_release_v])
+        bufIdx_o1, phase_o1 = _get_bufidx_phase(accum_cnt_o1, NUM_BUFFERS_O)
+        o1_view = tlx.local_view(o1_buf, bufIdx_o1)
+        producer_commit_o1_view = tlx.local_view(producer_commit_o1, bufIdx_o1)
+        bufIdx_v, phase_v = _get_bufidx_phase(accum_cnt_o1, NUM_BUFFERS_K)  # NUM_BUFFERS_K is NUM_BUFFERS_V
+        consumer_release_v_view = tlx.local_view(consumer_release_v, bufIdx_v)
+        # reinterpret as p1
+        p1_view = _reinterpret(qk1_buf, bufIdx_qk1)
+        tlx.async_dot(p1_view, v_view, o1_view, use_acc=not first,
+                      mBarriers=[producer_commit_o1_view, consumer_release_v_view])
+
         # q1 dot k, done using k for this iteration
-        tlx.async_dot(q1_view, k_view, qk1_view, use_acc=False, mBarriers=[consumer_release_k, producer_commit_qk1])
+        qk1_view = tlx.local_view(qk1_buf, bufIdx_qk)
+        consumer_release_k_view = tlx.local_view(consumer_release_k, bufIdx_k)
+        producer_commit_qk1_view = tlx.local_view(producer_commit_qk1, bufIdx_qk1)
+        tlx.async_dot(q1_view, k_view, qk1_view, use_acc=False,
+                      mBarriers=[consumer_release_k_view, producer_commit_qk1_view])
+
         # p0 dot v
-        tlx.barrier_wait(consumer_v)  # consumer wait for v
+        tlx.barrier_wait(consumer_v, phase_k)  # consumer wait for v
         # no need to acquire o0 as this is the only partition updating it
         # tlx.barrier_wait(producer_o0)  # producer acquire for o0
-        tlx.barrier_wait(producer_qk0)  # consumer wait for p0 use producer_qk0 due to reuse
-        tlx.async_dot(p0_view, v_view, o0_view, use_acc=True, mBarriers=[producer_commit_o0])
+        consumer_p1_view = tlx.local_view(producer_qk0, bufIdx_qk)
+        tlx.barrier_wait(consumer_p1_view, phase_qk)  # consumer wait for p0 use producer_qk0 due to reuse
+        # reinterpret as p0
+        p0_view = _reinterpret(qk0_buf, bufIdx_qk)
+        v_view = tlx.local_view(v_buf, bufIdx_k)
+        bufIdx_o, phase_o = _get_bufidx_phase(accum_cnt_k, NUM_BUFFERS_O)
+        o0_view = tlx.local_view(o0_buf, bufIdx_o)
+        tlx.async_dot(p0_view, v_view, o0_view, use_acc=True, mBarriers=[producer_commit_o0_view])
+
         first = False
+        accum_cnt_k += 1
+        accum_cnt_qk += 1
+        accum_cnt_qk1 += 1
+
     # epilogue
     # commit?
-    tlx.barrier_wait(producer_o1, phase_outer, first)  # producer acquire for o1
-    tlx.barrier_wait(producer_qk1)  # consumer wait for p1 due to reuse of p1 and qk1
+    tlx.barrier_wait(producer_o1_view, phase_o_outer, first)  # producer acquire for o1 at the first iteration
+    bufIdx_qk1, phase_qk1 = _get_bufidx_phase(accum_cnt_qk1, NUM_BUFFERS_QK)
+    consumer_p1_view = tlx.local_view(producer_qk1, bufIdx_qk1)
+    tlx.barrier_wait(consumer_p1_view, phase_qk1)  # consumer wait for p1 due to reuse of p1 and qk1
+    accum_cnt_qk1 += 1
     # release p0, p1 via producer_commit_qk0, qk1 barriers
-    tlx.async_dot(p1_view, v_view, o1_view, use_acc=not first,
-                  mBarriers=[producer_commit_o1, consumer_release_v, producer_commit_qk0, producer_commit_qk1])
-    return
+    # accum_cnt_qk should be equal to accum_cnt_qk1
+    bufIdx_qk, phase_qk = _get_bufidx_phase(accum_cnt_qk, NUM_BUFFERS_QK)
+    consumer_release_p0_view = tlx.local_view(producer_commit_qk0, bufIdx_qk)
+    consumer_release_p1_view = tlx.local_view(producer_commit_qk1, bufIdx_qk)
+    bufIdx_o, phase_o = _get_bufidx_phase(accum_cnt_k, NUM_BUFFERS_O)
+    producer_commit_o1_view = tlx.local_view(producer_commit_o1, bufIdx_o)
+    p1_view = _reinterpret(qk1_buf, bufIdx_qk)
+    tlx.async_dot(
+        p1_view, v_view, o1_view, use_acc=not first, mBarriers=[
+            producer_commit_o1_view, consumer_release_v_view, producer_commit_qk0_view, producer_commit_qk1_view
+        ])
+    return accum_cnt_k, accum_cnt_qk
+
 
 # typical configuration is 3/fast_gelu
 @triton.jit
 def fast_gelu(x):
     return x * 0.5 * (1 + tanh_approx_fp32(0.7978845608 * x * (1.0 + 0.044715 * x * x)))
 
+
 @triton.jit
-def _do_activation(qk_buffers, qk_scale, consumer_qk, consumer_release_qk, accum_cnt, v_dtype, activation_enum_int: tl.constexpr):
+def _do_activation(qk_buffers, qk_scale, consumer_qk, consumer_release_qk, accum_cnt, v_dtype,
+                   activation_enum_int: tl.constexpr):
     # qk in tmem, output p in tmem
     bufIdx = accum_cnt % NUM_BUFFERS_QK
     phase = (accum_cnt // NUM_BUFFERS_QK) & 1
@@ -211,6 +306,10 @@ def gdpa_kernel_tma_ws_blackwell(
     BROADCAST_Q: tl.constexpr,
     IS_DENSE_KV: tl.constexpr,
     activation_enum_int: tl.constexpr,
+    NUM_BUFFERS_Q: tl.constexpr,
+    NUM_BUFFERS_K: tl.constexpr,
+    NUM_BUFFERS_V: tl.constexpr,
+    NUM_BUFFERS_QK: tl.constexpr,
 ):
     n_tile_num = tl.cdiv(N_CTX, BLOCK_M)
     prog_id = tl.program_id(0)
@@ -257,12 +356,16 @@ def gdpa_kernel_tma_ws_blackwell(
     result_4 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float32, 1, tlx.storage_kind.tmem)
 
     # allocate barriers
-    consumer_q0
-    consumer_q1
-    consumer_k
-    consumer_v
-    producer_qk0, producer_commit_qk0,
-                             producer_qk1, producer_commit_qk1, consumer_release_k, consumer_release_v
+    consumer_q0 = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_Q, arrive_count=1)
+    consumer_q1 = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_Q, arrive_count=1)
+    consumer_k = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_K, arrive_count=1)
+    consumer_v = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_K, arrive_count=1)
+    producer_qk0 = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_QK, arrive_count=1)
+    producer_commit_qk0 = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_QK, arrive_count=1)
+    producer_qk1 = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_QK, arrive_count=1)
+    producer_commit_qk1 = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_QK, arrive_count=1)
+    consumer_release_k = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_K, arrive_count=1)
+    consumer_release_v = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_K, arrive_count=1)
 
     with tlx.async_tasks():
         # activation calculation
@@ -275,7 +378,8 @@ def gdpa_kernel_tma_ws_blackwell(
                     for start_n in range(lo, hi, BLOCK_N):
                         start_n = tl.multiple_of(start_n, BLOCK_N)
                         ## communication channel for qk0, p0
-                        _do_activation(qk0_buffers, qk_scale, consumer_qk0, consumer_release_qk0, accum_cnt, v_dtype, activation_enum_int)
+                        _do_activation(qk0_buffers, qk_scale, consumer_qk0, consumer_release_qk0, accum_cnt, v_dtype,
+                                       activation_enum_int)
                         accum_cnt += 1
 
         with tlx.async_task(num_warps=4):
@@ -287,16 +391,23 @@ def gdpa_kernel_tma_ws_blackwell(
                     for start_n in range(lo, hi, BLOCK_N):
                         start_n = tl.multiple_of(start_n, BLOCK_N)
                         ## communication channel for qk1, p1
-                        _do_activation(qk1_buffers, qk_scale, consumer_qk1, consumer_release_qk1, accum_cnt, v_dtype, activation_enum_int)
+                        _do_activation(qk1_buffers, qk_scale, consumer_qk1, consumer_release_qk1, accum_cnt, v_dtype,
+                                       activation_enum_int)
                         accum_cnt += 1
 
         with tlx.async_task(num_warps=1):  #gemm
+            accum_cnt_k = 0
+            accum_cnt_qk = 0
+            accum_cnt_outer = 0
             for _ in range(0, tiles_per_sm):
                 begin_q, qlen = _compute_qlen(tile_idx, n_tile_num, Q_offsets, seq_index, SORT_BY_SEQ_LENGTH)
                 if start_m * BLOCK_M < qlen:
-                    _do_dots(consumer_q0, consumer_q1, consumer_k, consumer_v, producer_qk0, producer_commit_qk0,
-                             producer_qk1, producer_commit_qk1, consumer_release_k, consumer_release_v, producer_o0,
-                             producer_commit_o0, producer_o1, producer_commit_o1)
+                    accum_cnt_k, accum_cnt_qk = _do_dots(consumer_q0, consumer_q1, consumer_k, consumer_v, producer_qk0,
+                                                         producer_commit_qk0, producer_qk1, producer_commit_qk1,
+                                                         consumer_release_k, consumer_release_v, producer_o0,
+                                                         producer_commit_o0, producer_o1, producer_commit_o1,
+                                                         accum_cnt_k, accum_cnt_qk, accum_cnt_outer)
+                    accum_cnt_outer += 1
                     # signal producer commit of epi0 and epi1, we don't want to block the gemm partition
                     # to wait for the completion
 
@@ -380,66 +491,20 @@ def gdpa_kernel_tma_ws_blackwell(
                         strides=[HEAD_DIM * H, 1],
                         block_shape=[BLOCK_M // 2, BLOCK_D],
                     )
-                    o0_desc.store(
-                        [
-                            (begin_q + start_m * BLOCK_M).to(tl.int32),
-                            (out_offset).to(tl.int32),
-                        ], o0)
+                    o0_desc.store([
+                        (begin_q + start_m * BLOCK_M).to(tl.int32),
+                        (out_offset).to(tl.int32),
+                    ], o0)
 
                     o1 = tlx.local_load(o1_tmem_view, tlx.storage_kind.tmem)
                     # release o1 here
                     tlx.barrier_arrive(consumer_release_o1_view, 1)
-                    o0_desc.store(
-                        [
-                            (begin_q + start_m * BLOCK_M + BLOCK_M // 2).to(tl.int32),
-                            (out_offset).to(tl.int32),
-                        ], o1)
+                    o0_desc.store([
+                        (begin_q + start_m * BLOCK_M + BLOCK_M // 2).to(tl.int32),
+                        (out_offset).to(tl.int32),
+                    ], o1)
                     accum_cnt_outer += 1
 
-
-def gdpa(a, b):
-    # Check constraints.
-    assert a.shape[1] == b.shape[0], "Incompatible dimensions"
-    assert a.is_contiguous(), "Matrix A must be contiguous"
-    M, K = a.shape
-    K, N = b.shape
-    # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=torch.float16)
-
-    # A dummy block value that will be overwritten when we have the real block size
-    dummy_block = [1, 1]
-    a_desc = TensorDescriptor(a, a.shape, a.stride(), dummy_block)
-    b_desc = TensorDescriptor(b, b.shape, b.stride(), dummy_block)
-    c_desc = TensorDescriptor(c, c.shape, c.stride(), dummy_block)
-
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-
-    # Persistent kernel to have thread block resident in SM as long as possible
-    grid = lambda META: (min(
-        NUM_SMS,
-        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    ), )
-    matmul_kernel_tma_ws_blackwell[grid](
-        a_desc, b_desc, c_desc,  #
-        M, N, K,  #
-        NUM_SMS=NUM_SMS,  #
-    )
-    return c
-
-
-torch.manual_seed(0)
-M, N, K = 8192, 8192, 8192
-a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
-b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
-torch_output = torch.matmul(a, b)
-triton_output = matmul(a, b)
-print(f"torch_output_with_fp16_inputs={torch_output}")
-print(f"triton_output_with_fp16_inputs={triton_output}")
-rtol = 0
-torch.testing.assert_close(triton_output, torch_output, atol=1e-2, rtol=rtol)
-print("✅ Triton and Torch match")
-
-ref_lib = "cuBLAS"
 
 configs = []
 configs.append(
