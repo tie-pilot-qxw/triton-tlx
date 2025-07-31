@@ -1,5 +1,5 @@
 from typing import Optional, Protocol
-
+from contextvars import ContextVar
 
 class Buffer(Protocol):
     def data_ptr(self) -> int: ...
@@ -17,7 +17,7 @@ class NullAllocator:
         )
 
 
-_allocator: Allocator = NullAllocator()
+_allocator: ContextVar[Allocator] = ContextVar("_allocator", default=NullAllocator())
 
 
 def set_allocator(allocator: Allocator):

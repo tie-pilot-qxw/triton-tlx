@@ -40,8 +40,6 @@
 
 #include "third_party/tlx/dialect/include/IR/Dialect.h"
 
-namespace {
-
 namespace py = pybind11;
 using namespace mlir;
 using namespace triton;
