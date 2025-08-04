@@ -119,8 +119,8 @@ def async_dot(
                 use_acc_handle = use_acc.handle
             else:
                 use_acc_handle = _semantic.builder.get_int1(use_acc.value)
-        output = _semantic.builder.create_tcgen5_dot(A_handle, B_handle, acc.handle, use_acc_handle, pred, handles)
-        return tlx.async_token(output)
+        output = _semantic.builder.create_tcgen5_dot(A_handle, B_handle, acc_handle, use_acc_handle, pred, handles)
+        return tl.tensor(output, tl.void)
     else:
         mma_layout = _semantic.builder.make_nv_mma_encoding_attr(A_handle, acc_handle, version, 0,
                                                                  _semantic.builder.options.num_warps)
