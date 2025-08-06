@@ -257,8 +257,9 @@ void init_triton_tlx_ir(py::module &&m) {
              return bufferViews;
            })
       .def("create_barrier_wait",
-           [](TritonOpBuilder &self, Value mbarrerLoc, Value phase) -> void {
-             self.create<ttng::WaitBarrierOp>(mbarrerLoc, phase);
+           [](TritonOpBuilder &self, Value mbarrerLoc, Value phase,
+              Value pred) -> void {
+             self.create<ttng::WaitBarrierOp>(mbarrerLoc, phase, pred);
            })
       .def(
           "create_barrier_arrive",
