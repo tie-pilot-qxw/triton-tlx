@@ -53,6 +53,7 @@ def barrier_expect_bytes(
 def barrier_wait(
     bar: tlx.buffered_tensor,
     phase,
+    pred: tl.tensor = None,
     _semantic=None,
 ) -> None:
     """
@@ -60,12 +61,14 @@ def barrier_wait(
     """
 
     # TODO. add validator logics
-
+    if pred is None:
+        pred_handle = _semantic.builder.get_int1(True)
+    else:
+        pred_handle = pred.handle
     if isinstance(phase, tl.tensor):
-        _semantic.builder.create_barrier_wait(bar.handle, phase.handle)
+        _semantic.builder.create_barrier_wait(bar.handle, phase.handle, pred_handle)
     elif isinstance(phase, tl.constexpr):
-        _semantic.builder.create_barrier_wait(bar.handle,
-                                              _semantic._convert_elem_to_ir_value(phase.value, require_i64=False))
+        _semantic.builder.create_barrier_wait(bar.handle, _semantic._convert_elem_to_ir_value(phase.value, require_i64=False), pred_handle)
     else:
         raise RuntimeError(f"`phase` is in type {type(phase)} (must be either `tl.tensor` or `tl.constexpr`)")
 
