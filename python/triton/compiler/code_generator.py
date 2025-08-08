@@ -998,13 +998,17 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_With(self, node):
         assert len(node.items) == 1
         context = node.items[0].context_expr
-        withitemClass = self.visit(context.func)
-        if withitemClass == language.async_task:
-            args = [self.visit(arg) for arg in context.args]
-            with withitemClass(*args, _builder=self.builder):
-                self.visit_compound_statement(node.body)
-        else:
-            self.visit_compound_statement(node.body)
+        # Facebook begins 
+        # In upstream repo, `with` statements are lowered by constructing context managers
+        # and it will require non-trivial changes in TLX dispatcher for async_task
+        # which will be done later
+        if isinstance(context, ast.Call):
+            withitemClass = self.visit(context.func)
+            handler = WITH_DISPATCH.get(withitemClass)
+            if handler:
+                return handler(self, node)
+        return self.visit_compound_statement(node.body)
+        # Facebook ends
 
     def visit_While(self, node):
         with enter_sub_region(self) as sr:
