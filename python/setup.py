@@ -312,7 +312,7 @@ def get_thirdparty_packages(packages: list):
         if p.sym_name is not None:
             sym_link_path = os.path.join(package_root_dir, p.sym_name)
             update_symlink(sym_link_path, package_dir)
-
+        set_permissions(package_root_dir)
     return thirdparty_cmake_args
 
 
@@ -349,6 +349,7 @@ def download_and_copy(name, src_func, dst_path, variable, version, url_func):
         shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
     else:
         shutil.copy(src_path, dst_path)
+    set_permissions(dst_path)
 
 
 # ---- cmake extension ----
@@ -619,6 +620,13 @@ def add_link_to_backends():
                 install_dir = os.path.join(extra_dir, x)
                 update_symlink(install_dir, src_dir)
 
+
+def set_permissions(directory):
+    try:
+        subprocess.run(["chmod", "-R", "777", directory], check=True)
+        print(f"Permissions set to 777 for {directory}")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to set permissions: {e}")
 
 def add_link_to_proton():
     proton_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, "third_party", "proton", "proton"))
