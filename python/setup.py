@@ -292,7 +292,7 @@ def get_thirdparty_packages(packages: list):
         if not is_offline_build() and not input_defined and not input_compatible:
             with contextlib.suppress(Exception):
                 shutil.rmtree(package_root_dir)
-            os.makedirs(package_root_dir, exist_ok=True)
+            os.makedirs(package_root_dir, mode=775, exist_ok=True)
             print(f'downloading and extracting {p.url} ...')
             with open_url(p.url) as response:
                 if p.url.endswith(".zip"):
