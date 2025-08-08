@@ -40,10 +40,8 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/SourceMgr.h"
 
-<<<<<<< HEAD
-=======
+#include "proton/Dialect/include/Dialect/Proton/IR/Dialect.h"
 #include "third_party/tlx/dialect/include/IR/Dialect.h"
-#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
 
 #include "llvm/ADT/SmallVector.h"
 
@@ -58,9 +56,6 @@ void setAsyncTaskIds(mlir::Operation *op,
   op->setAttr("async_task_id",
               DenseI32ArrayAttr::get(op->getContext(), sortedAsyncTaskIds));
 }
-
->>>>>>> 9d0f5d990 ([TLX-rebase][1/2] Resolve merge conflicts without running tests)
-namespace {
 
 namespace py = pybind11;
 using namespace mlir;
