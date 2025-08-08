@@ -55,7 +55,6 @@ void setAsyncTaskIds(mlir::Operation *op,
               DenseI32ArrayAttr::get(op->getContext(), sortedAsyncTaskIds));
 }
 
-namespace {
 
 namespace py = pybind11;
 using namespace mlir;
