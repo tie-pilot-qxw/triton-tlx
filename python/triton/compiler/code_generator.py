@@ -1057,6 +1057,24 @@ class CodeGenerator(ast.NodeVisitor):
             f'but is re-assigned to {loop_val.type} in loop! '\
             f'Please make sure that the type stays consistent.'
 
+    def visit_withitem(self, node):
+        return self.visit(node.context_expr)
+
+    def visit_With(self, node):
+        assert len(node.items) == 1
+        context = node.items[0].context_expr
+        # Facebook begins 
+        # In upstream repo, `with` statements are lowered by constructing context managers
+        # and it will require non-trivial changes in TLX dispatcher for async_task
+        # which will be done later
+        if isinstance(context, ast.Call):
+            withitemClass = self.visit(context.func)
+            handler = WITH_DISPATCH.get(withitemClass)
+            if handler:
+                return handler(self, node)
+        return self.visit_compound_statement(node.body)
+        # Facebook ends
+
     def visit_While(self, node):
         with enter_sub_region(self) as sr:
             liveins, insert_block = sr
