@@ -93,38 +93,22 @@ std::optional<UseInfo> getUseInfo(Operation *op) {
     return info;
   }
   if (auto load = dyn_cast<ttng::AsyncTMACopyGlobalToLocalOp>(op)) {
-    // for now, assume each AsyncTMACopyGlobalToLocalOp is bundled with a
-    // TensorDescToTMAPtrOp
-    auto tensorDescToTMAPtrOp =
-        load.getDescPtr().getDefiningOp<ttng::TensorDescToTMAPtrOp>();
-    if (!tensorDescToTMAPtrOp)
-      llvm::report_fatal_error("AsyncTMACopyGlobalToLocalOp expected to be "
-                               "bundled with a TensorDescToTMAPtrOp");
-    auto desc = tensorDescToTMAPtrOp.getDesc();
-    info.descriptor = desc;
+    info.descriptor = load.getDesc();
     info.desiredSharedEncoding = load.getResult().getType().getEncoding();
     assert(isTMACompatibleEncoding(info.desiredSharedEncoding) &&
            "expecting TMA compatible encoding");
     info.ctaLayout = ttg::getCTALayout(info.desiredSharedEncoding);
     auto shape = load.getResult().getType().getShape();
-    auto rank = desc.getType().getBlockType().getRank();
+    auto rank = load.getDesc().getType().getBlockType().getRank();
     info.shape = expandToRank(shape, rank);
     return info;
   }
   if (auto store = dyn_cast<ttng::AsyncTMACopyLocalToGlobalOp>(op)) {
-    // for now, assume each AsyncTMACopyGlobalToLocalOp is bundled with a
-    // TensorDescToTMAPtrOp
-    auto tensorDescToTMAPtrOp =
-        store.getDescPtr().getDefiningOp<ttng::TensorDescToTMAPtrOp>();
-    if (!tensorDescToTMAPtrOp)
-      llvm::report_fatal_error("AsyncTMACopyGlobalToLocalOp expected to be "
-                               "bundled with a TensorDescToTMAPtrOp");
-    auto desc = tensorDescToTMAPtrOp.getDesc();
-    info.descriptor = desc;
+    info.descriptor = store.getDesc();
     auto encoding = store.getSrc().getType().getEncoding();
     info.ctaLayout = ttg::getCTALayout(encoding);
     auto shape = store.getSrc().getType().getShape();
-    auto rank = desc.getType().getBlockType().getRank();
+    auto rank = store.getDesc().getType().getBlockType().getRank();
     info.shape = expandToRank(shape, rank);
     return info;
   }
