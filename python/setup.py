@@ -272,6 +272,13 @@ def update_symlink(link_path, source_path):
     link_path.absolute().parent.mkdir(parents=True, exist_ok=True)  # Ensure link's parent directory exists
     link_path.symlink_to(source_path, target_is_directory=True)
 
+def set_permissions(directory):
+    try:
+        subprocess.run(["chmod", "-R", "777", directory], check=True)
+        print(f"Permissions set to 777 for {directory}")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to set permissions: {e}")
+
 
 def get_thirdparty_packages(packages: list):
     triton_cache_path = get_triton_cache_path()
@@ -621,12 +628,15 @@ def add_link_to_backends():
                 update_symlink(install_dir, src_dir)
 
 
+<<<<<<< HEAD
 def set_permissions(directory):
     try:
         subprocess.run(["chmod", "-R", "777", directory], check=True)
         print(f"Permissions set to 777 for {directory}")
     except subprocess.CalledProcessError as e:
         print(f"Failed to set permissions: {e}")
+=======
+>>>>>>> 78d2fa039 (Fix download lib don't have execuate permission)
 
 def add_link_to_proton():
     proton_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, "third_party", "proton", "proton"))
