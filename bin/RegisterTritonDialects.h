@@ -4,14 +4,14 @@
 
 #include "nvidia/include/Dialect/NVGPU/IR/Dialect.h"
 #include "nvidia/include/Dialect/NVWS/IR/Dialect.h"
-#include "proton/dialect/include/Conversion/ProtonGPUToLLVM/Passes.h"
-#include "proton/dialect/include/Conversion/ProtonGPUToLLVM/ProtonAMDGPUToLLVM/Passes.h"
-#include "proton/dialect/include/Conversion/ProtonGPUToLLVM/ProtonNvidiaGPUToLLVM/Passes.h"
-#include "proton/dialect/include/Conversion/ProtonToProtonGPU/Passes.h"
-#include "proton/dialect/include/Dialect/Proton/IR/Dialect.h"
-#include "proton/dialect/include/Dialect/ProtonGPU/IR/Dialect.h"
+#include "proton/Dialect/include/Conversion/ProtonGPUToLLVM/Passes.h"
+#include "proton/Dialect/include/Conversion/ProtonGPUToLLVM/ProtonAMDGPUToLLVM/Passes.h"
+#include "proton/Dialect/include/Conversion/ProtonGPUToLLVM/ProtonNvidiaGPUToLLVM/Passes.h"
+#include "proton/Dialect/include/Conversion/ProtonToProtonGPU/Passes.h"
+#include "proton/Dialect/include/Dialect/Proton/IR/Dialect.h"
+#include "proton/Dialect/include/Dialect/ProtonGPU/IR/Dialect.h"
 
-#include "proton/dialect/include/Dialect/ProtonGPU/Transforms/Passes.h"
+#include "proton/Dialect/include/Dialect/ProtonGPU/Transforms/Passes.h"
 #include "third_party/tlx/dialect/include/IR/Dialect.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"

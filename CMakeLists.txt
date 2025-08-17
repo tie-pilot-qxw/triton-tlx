@@ -206,7 +206,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
   endif()
   # We always build proton dialect
   list(APPEND TRITON_PLUGIN_NAMES "proton")
-  add_subdirectory(third_party/proton/dialect)
+  add_subdirectory(third_party/proton/Dialect)
 
   if (TRITON_BUILD_TLX)
     add_subdirectory(third_party/tlx)
@@ -338,7 +338,7 @@ if(NOT TRITON_BUILD_PYTHON_MODULE)
   foreach(CODEGEN_BACKEND ${TRITON_CODEGEN_BACKENDS})
     add_subdirectory(third_party/${CODEGEN_BACKEND})
   endforeach()
-  add_subdirectory(third_party/proton/dialect)
+  add_subdirectory(third_party/proton/Dialect)
   add_subdirectory(third_party/tlx/dialect)
 endif()
 
