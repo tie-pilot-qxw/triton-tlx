@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 import triton.language.extra.tlx as tlx
 from triton.tools.tensor_descriptor import TensorDescriptor
+from triton._internal_testing import is_cuda
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -28,6 +29,8 @@ def _host_descriptor_pre_hook(nargs):
 
 
 configs = [
+    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'NUM_BUFFERS': 2, 'NUM_MMA_WARPS': 4, 'NUM_MMA_GROUPS': 1},
+                  num_stages=0, num_warps=4, pre_hook=_host_descriptor_pre_hook),
     triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'NUM_BUFFERS': 2, 'NUM_MMA_WARPS': 8, 'NUM_MMA_GROUPS': 2},
                   num_stages=0, num_warps=4, pre_hook=_host_descriptor_pre_hook),
 ]
@@ -35,16 +38,16 @@ configs = [
 
 @triton.autotune(configs=configs, key=["N_CTX", "HEAD_DIM", "FP8_OUTPUT"])
 @triton.jit
-def _attn_fwd_ws_pipelined_pingpong(sm_scale, M,  #
-                                    Z, H, desc_q, desc_k, desc_v, desc_o, N_CTX,  #
-                                    HEAD_DIM: tl.constexpr,  #
-                                    BLOCK_M: tl.constexpr,  #
-                                    BLOCK_N: tl.constexpr,  #
-                                    FP8_OUTPUT: tl.constexpr,  #
-                                    NUM_BUFFERS: tl.constexpr,  #
-                                    NUM_MMA_WARPS: tl.constexpr,  #
-                                    NUM_MMA_GROUPS: tl.constexpr,  #
-                                    ):
+def _attn_fwd_ws(sm_scale, M,  #
+              Z, H, desc_q, desc_k, desc_v, desc_o, N_CTX,  #
+              HEAD_DIM: tl.constexpr,  #
+              BLOCK_M: tl.constexpr,  #
+              BLOCK_N: tl.constexpr,  #
+              FP8_OUTPUT: tl.constexpr,  #
+              NUM_BUFFERS: tl.constexpr,  #
+              NUM_MMA_WARPS: tl.constexpr,  #
+              NUM_MMA_GROUPS: tl.constexpr,  #
+              ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
     BLOCK_M_SPLIT: tl.constexpr = BLOCK_M // NUM_MMA_GROUPS
 
@@ -122,126 +125,62 @@ def _attn_fwd_ws_pipelined_pingpong(sm_scale, M,  #
             qk_scale *= 1.44269504  # 1/log(2)
 
             # wait for the Q buffer to be populated by the producer
-            cid: tl.constexpr = tlx.async_task_replica_id()
+            cid = tlx.async_task_replica_id()
             q_full = tlx.local_view(q_fulls, cid)
             tlx.barrier_wait(q_full, 0)
             q_tile = tlx.local_view(q_tiles, cid)
 
             lo, hi = 0, N_CTX
-            k_phase = 0
-            v_phase = 1
-            k_buf_id = 0
-            v_buf_id = 0
-
-            # wait for the K[0] buffer to be populated by the producer
-            k_full = tlx.local_view(k_fulls, k_buf_id)
-            tlx.barrier_wait(k_full, k_phase)
-            k_tile = tlx.local_view(k_tiles, k_buf_id)
-
-            # -- compute qk[0] ----
-            k_tile = tlx.local_trans(k_tile)
-
-            if cid == 0:
-                # Consumer 0 waits for Consumer 1 to reach synchronization point at barrier 9.
-                tlx.named_barrier_wait(9, 256)
-            else:
-                # Consumer 1 signals its arrival at barrier 9.
-                tlx.named_barrier_arrive(9, 256)
-                # Then waits at barrier 10 until Consumer 0 finishes issuing its async_dot.
-                tlx.named_barrier_wait(10, 256)
-
-            qk = tlx.async_dot(q_tile, k_tile)
-
-            if cid == 0:
-                # After issuing async_dot, Consumer 0 signals barrier 10 to unblock Consumer 1.
-                tlx.named_barrier_arrive(10, 256)
-
-            # wait for the MMA using to complete
-            qk = tlx.async_dot_wait(0, qk)
-            # release the K buffer
-            k_empty = tlx.local_view(k_empties, k_buf_id)
-            tlx.barrier_arrive(k_empty, 1)
-
-            # -- compute m_i and l_i ----
-            m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
-            qk = qk * qk_scale - m_ij[:, None]
-            p = tl.math.exp2(qk)
-            # -- compute correction factor
-            alpha = tl.math.exp2(m_i - m_ij)
-            # -- update output accumulator[0] --
-            acc = acc * alpha[:, None]
-            l_ij = tl.sum(p, 1)
-            l_i = l_i * alpha + l_ij
-            m_i = m_ij
-            acc_cnt = 1
+            kv_phase = 1
+            acc_cnt = 0
 
             # loop over k, v and update accumulator
-            for _ in tl.range(lo + BLOCK_N, hi, BLOCK_N):
-                k_buf_id = acc_cnt % NUM_BUFFERS
+            for _ in tl.range(lo, hi, BLOCK_N):
+                buf_id = acc_cnt % NUM_BUFFERS
                 # buffers in a row share the same phase
-                k_phase = k_phase ^ (k_buf_id == 0)
+                kv_phase = kv_phase ^ (buf_id == 0)
 
                 # wait for the K buffer to be populated by the producer
-                k_full = tlx.local_view(k_fulls, k_buf_id)
-                tlx.barrier_wait(k_full, k_phase)
-                k_tile = tlx.local_view(k_tiles, k_buf_id)
+                k_full = tlx.local_view(k_fulls, buf_id)
+                tlx.barrier_wait(k_full, kv_phase)
+                k_tile = tlx.local_view(k_tiles, buf_id)
 
-                # compute qk for the current iteration
+                # -- compute qk ----
                 k_tile = tlx.local_trans(k_tile)
                 qk = tlx.async_dot(q_tile, k_tile)
-
-                # compute pv from the previous iteration
-                # wait for the previous V buffer to be populated by the producer
-                v_buf_id = (acc_cnt - 1) % NUM_BUFFERS
-                v_phase = v_phase ^ (v_buf_id == 0)
-                v_full = tlx.local_view(v_fulls, v_buf_id)
-                tlx.barrier_wait(v_full, v_phase)
-                v_tile = tlx.local_view(v_tiles, v_buf_id)
-                # prepare p and v for the dot
-                p = p.to(tlx.dtype_of(desc_k))
-                acc = tlx.async_dot(p, v_tile, acc)
-
-                # wait for the current qk MMA to complete
-                qk = tlx.async_dot_wait(1, qk)
+                # wait for the MMA using to complete
+                qk = tlx.async_dot_wait(0, qk)
                 # release the K buffer
-                k_empty = tlx.local_view(k_empties, k_buf_id)
+                k_empty = tlx.local_view(k_empties, buf_id)
                 tlx.barrier_arrive(k_empty, 1)
 
-                # -- compute m_i and l_i ----
                 m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
                 qk = qk * qk_scale - m_ij[:, None]
                 p = tl.math.exp2(qk)
                 # -- compute correction factor
                 alpha = tl.math.exp2(m_i - m_ij)
                 l_ij = tl.sum(p, 1)
-                # update m_i and l_i
-                l_i = l_i * alpha + l_ij
-                m_i = m_ij
-
                 # -- update output accumulator --
-                # wait for the previous pv MMA to complete
+                acc = acc * alpha[:, None]
+                # prepare p and v for the dot
+                p = p.to(tlx.dtype_of(desc_k))
+
+                # wait for the V buffer to be populated by the producer
+                v_full = tlx.local_view(v_fulls, buf_id)
+                tlx.barrier_wait(v_full, kv_phase)
+                v_tile = tlx.local_view(v_tiles, buf_id)
+                acc = tlx.async_dot(p, v_tile, acc)
+                # wait for the MMA using to complete
                 acc = tlx.async_dot_wait(0, acc)
                 # release the V buffer
-                v_empty = tlx.local_view(v_empties, v_buf_id)
+                v_empty = tlx.local_view(v_empties, buf_id)
                 tlx.barrier_arrive(v_empty, 1)
-                acc = acc * alpha[:, None]
-                acc_cnt += 1
 
-            # compute pv from the last iteration
-            # wait for the V buffer to be populated by the producer
-            v_buf_id = (acc_cnt - 1) % NUM_BUFFERS
-            v_phase = v_phase ^ (v_buf_id == 0)
-            v_full = tlx.local_view(v_fulls, v_buf_id)
-            tlx.barrier_wait(v_full, v_phase)
-            v_tile = tlx.local_view(v_tiles, v_buf_id)
-            # prepare p and v for the dot
-            p = p.to(tlx.dtype_of(desc_k))
-            acc = tlx.async_dot(p, v_tile, acc)
-            # wait for the MMA using to complete
-            acc = tlx.async_dot_wait(0, acc)
-            # release the V buffer
-            v_empty = tlx.local_view(v_empties, v_buf_id)
-            tlx.barrier_arrive(v_empty, 1)
+                # update m_i and l_i
+                # place this at the end of the loop to reduce register pressure
+                l_i = l_i * alpha + l_ij
+                m_i = m_ij
+                acc_cnt += 1
 
             # epilogue
             start_m = tl.program_id(0)
@@ -294,7 +233,7 @@ class _attention(torch.autograd.Function):
             return (triton.cdiv(q.shape[2], META["BLOCK_M"]), q.shape[0] * q.shape[1], 1)
 
         ctx.grid = grid
-        _attn_fwd_ws_pipelined_pingpong[grid](
+        _attn_fwd_ws[grid](
             sm_scale, M,  #
             q.shape[0], q.shape[1],  #
             desc_q, desc_k, desc_v, desc_o,  #
@@ -312,6 +251,10 @@ class _attention(torch.autograd.Function):
 attention = _attention.apply
 
 
+@pytest.mark.skipif(
+    not is_cuda() or torch.cuda.get_device_capability()[0] != 9,
+    reason="Requires Hopper GPU",
+)
 @pytest.mark.parametrize("Z", [8])
 @pytest.mark.parametrize("H", [16])
 @pytest.mark.parametrize("N_CTX", [1024])
@@ -378,11 +321,14 @@ configs.append(
         x_names=["N_CTX"],
         x_vals=[2**i for i in range(10, 15)],
         line_arg="provider",
-        line_vals=["triton-fp16"] + (["flash"] if HAS_FLASH else []),
-        line_names=["Triton [FP16]"] + (["Flash-2"] if HAS_FLASH else []),
+        line_vals=["triton-fp16"]  +
+        (["flash"] if HAS_FLASH else []),
+        line_names=["Triton [FP16]"] +
+        (["Flash-2"] if HAS_FLASH else []),
         styles=[("red", "-"), ("blue", "-"), ("green", "-")],
         ylabel="TFLOPS",
-        plot_name=f"fused-attention-ws-pipelined-pingpong-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}",
+        plot_name=
+        f"fused-attention-ws-batch{BATCH}-head{N_HEADS}-d{HEAD_DIM}",
         args={
             "H": N_HEADS,
             "BATCH": BATCH,
@@ -430,5 +376,8 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, mode, provider, device=DEVI
 
 
 if __name__ == "__main__":
-    # only works on post-Ampere GPUs right now
-    bench_flash_attention.run(save_path=".", print_data=True)
+    if is_cuda() and torch.cuda.get_device_capability()[0] == 9:
+        print("Running benchmarks...")
+        bench_flash_attention.run(save_path=".", print_data=True)
+    else:
+        print("Skipping benchmarks, no Hopper GPU found.")
