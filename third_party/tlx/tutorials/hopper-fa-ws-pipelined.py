@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 import triton.language.extra.tlx as tlx
 from triton.tools.tensor_descriptor import TensorDescriptor
+from triton._internal_testing import is_cuda
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -306,6 +307,10 @@ attention = _attention.apply
 @pytest.mark.parametrize("HEAD_DIM", [128])
 @pytest.mark.parametrize("mode", ["fwd"])
 @pytest.mark.parametrize("provider", ["triton-fp16"])
+@pytest.mark.skipif(
+    not is_cuda() or torch.cuda.get_device_capability()[0] != 9,
+    reason="Requires Hopper GPU",
+)
 def test_op(Z, H, N_CTX, HEAD_DIM, mode, provider, dtype=torch.float16):
     if mode == "bwd":
         pytest.skip("Backward pass not supported.")
@@ -421,5 +426,8 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, mode, provider, device=DEVI
 
 
 if __name__ == "__main__":
-    # only works on post-Ampere GPUs right now
-    bench_flash_attention.run(save_path=".", print_data=True)
+    if is_cuda() and torch.cuda.get_device_capability()[0] == 9:
+        print("Running benchmarks...")
+        bench_flash_attention.run(save_path=".", print_data=True)
+    else:
+        print("Skipping benchmarks, no Hopper GPU found.")

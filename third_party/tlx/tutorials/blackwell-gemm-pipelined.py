@@ -1,3 +1,4 @@
+import pytest
 from typing import Optional
 
 import torch
@@ -5,6 +6,7 @@ import torch
 import triton
 import triton.language as tl
 import triton.language.extra.tlx as tlx
+from triton._internal_testing import is_cuda
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -170,21 +172,21 @@ def matmul(a, b):
     )
     return c
 
-
-torch.manual_seed(0)
-M, N, K = 512, 512, 512
-a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
-b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
-torch_output = torch.matmul(a, b)
-triton_output = matmul(a, b)
-print(f"torch_output_with_fp16_inputs={torch_output}")
-print(f"triton_output_with_fp16_inputs={triton_output}")
-rtol = 0
-if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol):
-    print("✅ Triton and Torch match")
-else:
-    print("❌ Triton and Torch differ")
-    exit(1)
+@pytest.mark.skipif(
+    not is_cuda() or torch.cuda.get_device_capability()[0] != 10,
+    reason="Requires Blackwell GPU",
+)
+def test_op():
+    torch.manual_seed(0)
+    M, N, K = 512, 512, 512
+    a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
+    b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
+    torch_output = torch.matmul(a, b)
+    triton_output = matmul(a, b)
+    print(f"torch_output_with_fp16_inputs={torch_output}")
+    print(f"triton_output_with_fp16_inputs={triton_output}")
+    rtol = 0
+    torch.allclose(triton_output, torch_output, atol=1e-2, rtol=rtol)
 
 ref_lib = 'cuBLAS'
 
@@ -218,5 +220,9 @@ def benchmark(M, N, K, provider):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-print("Running benchmarks...")
-benchmark.run(show_plots=True, print_data=True)
+if __name__ == "__main__":
+    if is_cuda() and torch.cuda.get_device_capability()[0] == 10:
+        print("Running benchmarks...")
+        benchmark.run(show_plots=True, print_data=True)
+    else:
+        print("Skipping benchmarks, no Blackwell GPU found.")
