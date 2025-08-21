@@ -32,9 +32,16 @@ def is_cuda():
 
 def get_cuda_autotune_config():
     return [
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128, 'NUM_STAGES': 2}, num_stages=0, num_warps=4,
+        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128, 'NUM_STAGES': 2, 'NUM_MI_BUFFER': 3}, num_stages=0, num_warps=4,
                       pre_hook=_host_descriptor_pre_hook),
     ]
+
+
+@triton.jit
+def _get_bufidx_phase(accum_cnt, NUM_BUFFERS):
+    bufIdx = accum_cnt % NUM_BUFFERS
+    phase = (accum_cnt // NUM_BUFFERS) & 1
+    return bufIdx, phase
 
 
 @triton.autotune(
@@ -57,6 +64,7 @@ def tlx_attention_fwd(
     BLOCK_N: tl.constexpr,  #
     FP8_OUTPUT: tl.constexpr,  #
     NUM_STAGES: tl.constexpr,
+    NUM_MI_BUFFER: tl.constexpr,
 ):
     # dtype = tl.float8e5 if FP8_OUTPUT else tl.float16
     tl.static_assert(BLOCK_N <= HEAD_DIM)
@@ -92,14 +100,17 @@ def tlx_attention_fwd(
     tlx.async_descriptor_load(desc_q, buffer_q1, [qo_offset_y + BLOCK_M // 2, 0], barrier_q1)
 
     # allocate NUM_STAGES buffers for k, v
-    buffer_23 = tlx.local_alloc((BLOCK_N, HEAD_DIM), tl.float16, NUM_STAGES)  # k
-    buffer_32 = tlx.local_alloc((BLOCK_N, HEAD_DIM), tl.float16, NUM_STAGES)  # v
-    buffer_63 = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 3)  # m_i
-    buffer_73 = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 3)
-    buffer_83 = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 1)
-    buffer_84 = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 1)
-    buffer_85 = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 1)
-    buffer_86 = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 1)
+    buffer_k = tlx.local_alloc((BLOCK_N, HEAD_DIM), tl.float16, NUM_STAGES)  # k
+    buffer_v = tlx.local_alloc((BLOCK_N, HEAD_DIM), tl.float16, NUM_STAGES)  # v
+    # for each iteration, where we pass from softmax to correction
+    buffer_m_i0 = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, NUM_MI_BUFFER)  # share m_i and m_ij slice 0
+    buffer_m_i1 = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, NUM_MI_BUFFER)  # share m_i and m_ij slice 1
+    # buffer_m_i, buffer_l_i, slice 0 and slice 1
+    # for the final output, to pass from softmax to epilogue
+    buffer_m_i0_final = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 1)
+    buffer_l_i0_final = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 1)
+    buffer_m_i1_final = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 1)
+    buffer_l_i1_final = tlx.local_alloc((BLOCK_M // 2, ), tl.float32, 1)
 
     # allocate tmem
     result = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float32, 1, tlx.storage_kind.tmem)
@@ -108,61 +119,64 @@ def tlx_attention_fwd(
     result_4 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float32, 1, tlx.storage_kind.tmem)
 
     # allocate barriers for channels
-    barrier_24 = tlx.alloc_barriers(num_barriers=NUM_STAGES, arrive_count=1)
-    barrier_27 = tlx.alloc_barriers(num_barriers=NUM_STAGES, arrive_count=1)
-    barrier_33 = tlx.alloc_barriers(num_barriers=NUM_STAGES, arrive_count=1)
-    barrier_36 = tlx.alloc_barriers(num_barriers=NUM_STAGES, arrive_count=1)
-    barrier_39 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_41 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_43 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_45 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_47 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_49 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_51 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_53 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_55 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_57 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_59 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_61 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    barrier_64 = tlx.alloc_barriers(num_barriers=3, arrive_count=1)
-    barrier_65 = tlx.alloc_barriers(num_barriers=3, arrive_count=1)
-    barrier_74 = tlx.alloc_barriers(num_barriers=3, arrive_count=1)
-    barrier_75 = tlx.alloc_barriers(num_barriers=3, arrive_count=1)
+    consumer_release_k = tlx.alloc_barriers(num_barriers=NUM_STAGES, arrive_count=1)
+    consumer_k = tlx.alloc_barriers(num_barriers=NUM_STAGES, arrive_count=1)
+    consumer_release_v = tlx.alloc_barriers(num_barriers=NUM_STAGES, arrive_count=1)
+    consumer_v = tlx.alloc_barriers(num_barriers=NUM_STAGES, arrive_count=1)
+    producer_commit_qk0 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    producer_qk0 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    # used in correction for acc0
+    producer_commit_acc0_correction = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    producer_commit_acc0 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+
+    producer_p0 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    producer_commit_p0 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    producer_commit_qk1 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    producer_qk1 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    # used in correction for acc1
+    producer_commit_acc1_correction = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    producer_commit_acc1 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    producer_p1 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    producer_commit_p1 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
+    # barrier for m_i, m_ij
+    # m_i and m_ij share the same buffer
+    consumer_m_i0 = tlx.alloc_barriers(num_barriers=NUM_MI_BUFFER, arrive_count=1)
+    consumer_release_m_i0 = tlx.alloc_barriers(num_barriers=NUM_MI_BUFFER, arrive_count=1)
+    consumer_m_i1 = tlx.alloc_barriers(num_barriers=NUM_MI_BUFFER, arrive_count=1)
+    consumer_release_m_i1 = tlx.alloc_barriers(num_barriers=NUM_MI_BUFFER, arrive_count=1)
 
     # causal = False
     lo, hi = 0, N_CTX
     with tlx.async_tasks():
         with tlx.async_task("default"):  # correction
             # set up arguments
-            arg26, arg27, arg28, arg30 = 0, 0, 0, 0
-            arg29 = -1
+            accum_cnt = 0
+            accum_cnt_m_i = 0
             for start_n in tl.range(lo, hi, BLOCK_N):
                 # data slice 0
                 # convert from ttng.wait_barrier to tlx.barrier_wait, trace the barrier and the phase
-                val_116 = arg26 ^ 1
-                val_117 = arg27 + 1
-                val_121 = 1 if val_117 == 3 else val_117
-                val_120 = arg28 ^ 1 if val_117 == 3 else arg28
-                view_1 = tlx.local_view(buffer_63, val_121)
-                view_2 = tlx.local_view(barrier_64, val_121)
-                view_3 = tlx.local_view(barrier_65, val_121)
+                val_121, val_120 = _get_bufidx_phase(accum_cnt_m_i, NUM_MI_BUFFER)
+                view_1 = tlx.local_view(buffer_m_i0, val_121)
+                view_2 = tlx.local_view(consumer_m_i0, val_121)
+                view_3 = tlx.local_view(consumer_release_m_i0, val_121)
+                # wait for m_i is done
                 tlx.barrier_wait(view_2, val_120)
                 m_i = tlx.local_load(view_1, tlx.storage_kind.smem)  # m_i
                 tlx.barrier_arrive(view_3, 1)
 
-                val_126 = arg29 + 1
-                val_130 = 1 if val_126 == 3 else val_126
-                val_129 = arg30 ^ 1 if val_126 == 3 else arg30
-                view_4 = tlx.local_view(buffer_63, val_130)
-                view_5 = tlx.local_view(barrier_64, val_130)
-                view_6 = tlx.local_view(barrier_65, val_130)
+                val_130, val_129 = _get_bufidx_phase(accum_cnt_m_i + 1, NUM_MI_BUFFER)
+                view_4 = tlx.local_view(buffer_m_i0, val_130)
+                view_5 = tlx.local_view(consumer_m_i0, val_130)
+                view_6 = tlx.local_view(consumer_release_m_i0, val_130)
+                # wait for m_ij is done
                 tlx.barrier_wait(view_5, val_129)
                 m_ij = tlx.local_load(view_4)  # m_ij
                 tlx.barrier_arrive(view_6, 1)
 
                 alpha = tl.math.exp2(m_i - m_ij)
-                view_7 = tlx.local_view(barrier_45, 0)
-                tlx.barrier_wait(view_7, arg26)  # acc0
+                view_7 = tlx.local_view(producer_commit_acc0, 0)
+                buf, phase = _get_bufidx_phase(accum_cnt, 1)
+                tlx.barrier_wait(view_7, phase)  # acc0
                 # subtiling to reduce register pressure when hDim is 128
                 view_8 = tlx.local_view(result_2, 0)
                 view_9 = tlx.subslice(view_8, 0, HEAD_DIM // 2)  # N = 0
@@ -173,27 +187,27 @@ def tlx_attention_fwd(
                 result_8 = tlx.local_load(view_10, tlx.storage_kind.tmem)
                 val_142 = result_8 * alpha[:, None]
                 tlx.local_store(view_10, val_142, tlx.storage_kind.tmem)
-                view_11 = tlx.local_view(barrier_43, 0)
+                view_11 = tlx.local_view(producer_commit_acc0_correction, 0)
                 tlx.barrier_arrive(view_11, 1)  # acc0
 
                 # data slice 1
-                view_12 = tlx.local_view(buffer_73, val_121)
-                view_13 = tlx.local_view(barrier_74, val_121)
-                view_14 = tlx.local_view(barrier_75, val_121)
+                view_12 = tlx.local_view(buffer_m_i1, val_121)
+                view_13 = tlx.local_view(consumer_m_i1, val_121)
+                view_14 = tlx.local_view(consumer_release_m_i1, val_121)
                 tlx.barrier_wait(view_13, val_120)
                 m_i1 = tlx.local_load(view_12, tlx.storage_kind.smem)  # m_i
                 tlx.barrier_arrive(view_14, 1)
 
-                view_15 = tlx.local_view(buffer_73, val_130)
-                view_16 = tlx.local_view(barrier_74, val_130)
-                view_17 = tlx.local_view(barrier_75, val_130)
+                view_15 = tlx.local_view(buffer_m_i1, val_130)
+                view_16 = tlx.local_view(consumer_m_i1, val_130)
+                view_17 = tlx.local_view(consumer_release_m_i1, val_130)
                 tlx.barrier_wait(view_16, val_129)
                 m_ij1 = tlx.local_load(view_15)  # m_ij
                 tlx.barrier_arrive(view_17, 1)
 
                 alpha1 = tl.math.exp2(m_i1 - m_ij1)
-                view_18 = tlx.local_view(barrier_57, 0)
-                tlx.barrier_wait(view_18, arg26)  # acc1
+                view_18 = tlx.local_view(producer_commit_acc1, 0)
+                tlx.barrier_wait(view_18, phase)  # acc1
                 # subtiling to reduce register pressure when hDim is 128
                 view_19 = tlx.local_view(result, 0)
                 view_20 = tlx.subslice(view_19, 0, HEAD_DIM // 2)  # N = 0
@@ -204,231 +218,239 @@ def tlx_attention_fwd(
                 result_10 = tlx.local_load(view_21, tlx.storage_kind.tmem)
                 val_158 = result_10 * alpha1[:, None]
                 tlx.local_store(view_21, val_158, tlx.storage_kind.tmem)
-                view_22 = tlx.local_view(barrier_55, 0)
+                view_22 = tlx.local_view(producer_commit_acc1_correction, 0)
                 tlx.barrier_arrive(view_22, 1)  # acc1
 
                 # update loop variables
-                arg26 = val_116
-                arg27 = val_121
-                arg28 = val_120
-                arg29 = val_130
-                arg30 = val_129
+                accum_cnt = accum_cnt + 1
+                accum_cnt_m_i = accum_cnt_m_i + 2
 
         with tlx.async_task(num_warps=1):  # gemm
             # dot0_slice0
-            view_1 = tlx.local_view(barrier_24, 0)
-            view_2 = tlx.local_view(barrier_27, 0)
-            view_3 = tlx.local_view(buffer_23, 0)  # k
+            view_1 = tlx.local_view(consumer_release_k, 0)
+            view_2 = tlx.local_view(consumer_k, 0)
+            view_3 = tlx.local_view(buffer_k, 0)  # k
             view_4 = tlx.local_trans(view_3)
+            # wait for q0 and k, barrier will be consumer_k, consumer_k
             tlx.barrier_wait(view_2, 0)
-            view_5 = tlx.local_view(barrier_41, 0)
+            view_5 = tlx.local_view(producer_qk0, 0)
             tlx.barrier_wait(view_5, 0)
             view_6 = tlx.local_view(result_3, 0)
-            # dot0_slice1: q0 . k
-            view_7 = tlx.local_view(barrier_39, 0)
-            tlx.async_dot(buffer_q0, view_4, view_6, mBarriers=[view_1, view_7])
-            view_8 = tlx.local_view(barrier_53, 0)
+            # dot0_slice1: q0 . k, producer_commit_qk0
+            view_7 = tlx.local_view(producer_commit_qk0, 0)
+            tlx.async_dot(buffer_q0, view_4, view_6, mBarriers=[view_7])
+            view_8 = tlx.local_view(producer_qk1, 0)
             tlx.barrier_wait(view_8, 0)  # has predicate?
             view_9 = tlx.local_view(result_4, 0)
-            view_10 = tlx.local_view(barrier_51, 0)
+            # producer_commit_qk1
+            view_10 = tlx.local_view(producer_commit_qk1, 0)
             tlx.async_dot(buffer_q1, view_4, view_9, mBarriers=[view_1, view_10])
 
-            arg65, arg66, arg67 = 0, 0, 0
+            accum_cnt = 0
             for start_n in tl.range(lo, hi, BLOCK_N):
                 val_121 = hi - 128
-                # dot1_slice0_iter_i
-                view_11 = tlx.local_view(barrier_33, arg65)
-                view_12 = tlx.local_view(barrier_36, arg65)
-                view_13 = tlx.local_view(buffer_32, arg65)
-                tlx.barrier_wait(view_12, arg66)
-                view_14 = tlx.local_view(barrier_43, 0)
-                val_126 = arg67 ^ 1
-                tlx.barrier_wait(view_14, val_126)
-                tlx.barrier_wait(barrier_49, arg67)
+                # dot1_slice0_iter_i: p0 . v
+                buf_v, phase_v = _get_bufidx_phase(accum_cnt, 2)
+                view_11 = tlx.local_view(consumer_release_v, buf_v)
+                view_12 = tlx.local_view(consumer_v, buf_v)
+                view_13 = tlx.local_view(buffer_v, buf_v)
+                tlx.barrier_wait(view_12, phase_v)
+                view_14 = tlx.local_view(producer_commit_acc0_correction, 0)
+                buf, phase = _get_bufidx_phase(accum_cnt, 1)
+                tlx.barrier_wait(view_14, phase ^ 1)
+                tlx.barrier_wait(producer_commit_p0, phase)
                 view_15 = tlx.local_reinterpret(view_6, tl.float16)
                 view_16 = tlx.local_view(result_2, 0)
-                view_17 = tlx.local_view(barrier_45, 0)
-                view_t = tlx.local_view(barrier_47, 0)
-                tlx.async_dot(view_15, view_13, view_16, mBarriers=[view_11, view_17, view_t])  #barrier_47])
-                # dot0_slice0_iter_i+1
-                val_128 = arg65 + 1
-                val_131 = 0 if val_128 == 2 else val_128
-                val_132 = arg66 ^ 1 if val_128 == 2 else arg66
-                view_18 = tlx.local_view(barrier_24, val_131)
-                view_19 = tlx.local_view(barrier_27, val_131)
-                view_20 = tlx.local_view(buffer_23, val_131)
+                view_17 = tlx.local_view(producer_commit_acc0, 0)
+                view_t = tlx.local_view(producer_p0, 0)
+                # releave v, consumer_release for p0 via producer_p0, producer_commit_acc0
+                tlx.async_dot(view_15, view_13, view_16, mBarriers=[view_17, view_t])
+                # dot0_slice0_iter_i+1: q0 . k
+                val_131, val_132 = _get_bufidx_phase(accum_cnt + 1, 2)
+                view_18 = tlx.local_view(consumer_release_k, val_131)
+                view_19 = tlx.local_view(consumer_k, val_131)
+                view_20 = tlx.local_view(buffer_k, val_131)
                 view_21 = tlx.local_trans(view_20)
                 tlx.barrier_wait(view_19, val_132)  #, pred=start_n < val_121)
-                tlx.barrier_wait(view_5, arg67 ^ 1)  #, pred=start_n < val_121)
-                tlx.async_dot(buffer_q0, view_21, view_6, mBarriers=[view_18, view_7])  #pred=start_n < val_121
+                tlx.barrier_wait(view_5, phase ^ 1)  #, pred=start_n < val_121)
+                # commit qk0
+                tlx.async_dot(buffer_q0, view_21, view_6, mBarriers=[view_7])  #pred=start_n < val_121
                 view_22 = tlx.local_reinterpret(view_9, tl.float16)
-                view_23 = tlx.local_view(barrier_55, 0)
-                tlx.barrier_wait(view_23, arg67 ^ 1)
-                tlx.barrier_wait(barrier_61, arg67)
-                # dot1_slice1_iter_i
+                view_23 = tlx.local_view(producer_commit_acc1_correction, 0)
+                tlx.barrier_wait(view_23, phase ^ 1)
+                tlx.barrier_wait(producer_commit_p1, phase)
+                # dot1_slice1_iter_i: p1 . v
                 view_24 = tlx.local_view(result, 0)
-                view_25 = tlx.local_view(barrier_57, 0)
-                view_t = tlx.local_view(barrier_59, 0)
+                view_25 = tlx.local_view(producer_commit_acc1, 0)
+                view_t = tlx.local_view(producer_p1, 0)
+                # release v, commit result
                 tlx.async_dot(view_22, view_13, view_24, mBarriers=[view_11, view_25, view_t])
-                tlx.barrier_wait(view_8, arg67 ^ 1)  #, pred=start_n < val_121)
-                # dot0_slice1_iter_i+1
+                tlx.barrier_wait(view_8, phase ^ 1)  #, pred=start_n < val_121)
+                # dot0_slice1_iter_i+1: q1 . k
+                # release k, commit qk1
                 tlx.async_dot(buffer_q1, view_21, view_9, mBarriers=[view_18, view_10])  #pred=start_n < val_121
 
-                # update arg65/arg66/arg67
-                arg65 = val_131
-                arg66 = val_132
-                arg67 = val_126
+                accum_cnt = accum_cnt + 1
 
         with tlx.async_task(num_warps=1):  # load
-            view_1 = tlx.local_view(barrier_24, 0)
+            # producer_acquire for q0: consumer_release
+            view_1 = tlx.local_view(consumer_release_k, 0)
             tlx.barrier_wait(view_1, 0)
-            view_2 = tlx.local_view(barrier_27, 0)
+            # producer_commit for q0: consumer_k
+            view_2 = tlx.local_view(consumer_k, 0)
             tlx.barrier_expect_bytes(view_2, 32768)
-            view_3 = tlx.local_view(buffer_23, 0)
+            view_3 = tlx.local_view(buffer_k, 0)
             tlx.async_descriptor_load(desc_k, view_3, [offset_y, 0], view_2)
 
-            view_4 = tlx.local_view(barrier_24, 1)
+            view_4 = tlx.local_view(consumer_release_k, 1)
             tlx.barrier_wait(view_4, 0)  #, pred=hi > 128)
-            view_5 = tlx.local_view(barrier_27, 1)
+            view_5 = tlx.local_view(consumer_k, 1)
             tlx.barrier_expect_bytes(view_5, 32768)
-            view_6 = tlx.local_view(buffer_23, 1)
+            view_6 = tlx.local_view(buffer_k, 1)
             tlx.async_descriptor_load(desc_k, view_6, [offset_y + 128, 0], view_5)  #, pred=hi > 128)
-            # load k_iter_0, k_iter_1
-            arg65 = offset_y + 128
-            arg66 = 1
-            arg67, arg68, arg69 = 0, 0, 0
+
             arg70 = offset_y
+            accum_cnt = 0
             for start_n in tl.range(lo, hi, BLOCK_N):
                 start_n = tl.multiple_of(start_n, BLOCK_N)
-                val_126 = hi - 256
+                # val_126 = hi - 256
                 # load v_iter_i
-                view_7 = tlx.local_view(barrier_33, arg68)
-                tlx.barrier_wait(view_7, arg69)
-                view_8 = tlx.local_view(barrier_36, arg68)
+                bufIdx, phase = _get_bufidx_phase(accum_cnt, 2)
+                view_7 = tlx.local_view(consumer_release_v, bufIdx)
+                tlx.barrier_wait(view_7, phase ^ 1)  # producer acquire
+                view_8 = tlx.local_view(consumer_v, bufIdx)
                 tlx.barrier_expect_bytes(view_8, 32768)
-                view_9 = tlx.local_view(buffer_32, arg68)
+                view_9 = tlx.local_view(buffer_v, bufIdx)
                 tlx.async_descriptor_load(desc_v, view_9, [arg70, 0], view_8)
 
-                # load k_iter_i+2 with predicate
-                val_132 = arg68 + 1
-                val_135 = 0 if val_132 == 2 else val_132
-                val_136 = arg69 ^ 1 if val_132 == 2 else arg69
-                val_137 = arg65 + 128
-                val_138 = arg66 + 1
-                val_141 = 0 if val_138 == 2 else val_138
-                val_142 = arg67 ^ 1 if val_138 == 2 else arg67
-                view_10 = tlx.local_view(barrier_24, val_141)
-                tlx.barrier_wait(view_10, val_142)  #, pred=start_n < val_126)
-                view_11 = tlx.local_view(barrier_27, val_141)
+                # load k_iter_i with predicate
+                view_10 = tlx.local_view(consumer_release_k, bufIdx)
+                tlx.barrier_wait(view_10, phase ^ 1)  # acquire
+                view_11 = tlx.local_view(consumer_k, bufIdx)
                 tlx.barrier_expect_bytes(view_11, 32768)
-                view_12 = tlx.local_view(buffer_23, val_141)
-                tlx.async_descriptor_load(desc_k, view_12, [val_137, 0], view_11)  #, pred=start_n < val_126)
+                view_12 = tlx.local_view(buffer_k, bufIdx)
+                tlx.async_descriptor_load(desc_k, view_12, [arg70, 0], view_11)  #, pred=start_n < val_126)
 
                 # update args
-                arg70 = arg65
-                arg65 = val_137
-                arg66 = val_141
-                arg67 = val_142
-                arg68 = val_135
-                arg69 = val_136
+                arg70 = arg70 + 128
+                accum_cnt = accum_cnt + 1
 
         with tlx.async_task(num_warps=4):  # softmax0
-            arg65 = cst_10
-            arg66 = cst_9
-            arg67, arg68, arg69 = 0, 0, 0
+            # inputs; m_i, qk
+            l_i = cst_10
+            m_i = cst_9
+            accum_cnt_m_i = 0
+            accum_cnt = 0
             for start_n in tl.range(lo, hi, BLOCK_N):
-                view_1 = tlx.local_view(barrier_39, 0)
-                tlx.barrier_wait(view_1, arg67)
-                view_2 = tlx.local_view(result_3, 0)
+                bufIdx, phase = _get_bufidx_phase(accum_cnt, 1)
+                view_1 = tlx.local_view(producer_commit_qk0, bufIdx)
+                tlx.barrier_wait(view_1, phase)
+                view_2 = tlx.local_view(result_3, bufIdx)
                 result_14 = tlx.local_load(view_2, tlx.storage_kind.tmem)
-                view_3 = tlx.local_view(barrier_41, 0)
+                view_3 = tlx.local_view(producer_qk0, bufIdx)
                 tlx.barrier_arrive(view_3, 1)
 
-                m_ij = tl.maximum(arg66, tl.max(result_14, 1) * qk_scale)
+                m_ij = tl.maximum(m_i, tl.max(result_14, 1) * qk_scale)
 
-                val_122 = arg68 + 1
-                val_125 = arg69 ^ 1 if val_122 == 3 else arg69
-                val_126 = 1 if val_122 == 3 else val_122
-                view_4 = tlx.local_view(buffer_63, val_126)
-                view_5 = tlx.local_view(barrier_64, val_126)
-                view_6 = tlx.local_view(barrier_65, val_126)
-                tlx.barrier_wait(view_6, val_125)
+                # need to store m_i for correction to use
+                bufIdx_m_i, phase_m_i = _get_bufidx_phase(accum_cnt_m_i, NUM_MI_BUFFER)
+                view_14 = tlx.local_view(buffer_m_i0, bufIdx_m_i)
+                view_15 = tlx.local_view(consumer_m_i0, bufIdx_m_i)
+                view_16 = tlx.local_view(consumer_release_m_i0, bufIdx_m_i)
+                tlx.barrier_wait(view_16, phase_m_i)
+                tlx.local_store(view_14, m_i)
+                tlx.barrier_arrive(view_15, 1)
+                # store m_ij
+                bufIdx_m_ij, phase_m_ij = _get_bufidx_phase(accum_cnt_m_i + 1, NUM_MI_BUFFER)
+                view_4 = tlx.local_view(buffer_m_i0, bufIdx_m_ij)
+                view_5 = tlx.local_view(consumer_m_i0, bufIdx_m_ij)
+                view_6 = tlx.local_view(consumer_release_m_i0, bufIdx_m_ij)
+                tlx.barrier_wait(view_6, phase_m_ij)
                 tlx.local_store(view_4, m_ij)
                 tlx.barrier_arrive(view_5, 1)
 
                 val_133 = result_14 * qk_scale - m_ij[:, None]
                 val_134 = tl.math.exp2(val_133)  # p
-                val_136 = tl.math.exp2(arg66 - m_ij)  # alpha
+                val_136 = tl.math.exp2(m_i - m_ij)  # alpha
                 val_137 = tl.sum(val_134, 1)  # l_ij
                 p = val_134.to(tl.float16)
                 view_7 = tlx.local_view(result_3, 0)
                 view_8 = tlx.local_reinterpret(view_7, tl.float16)
-                tlx.barrier_wait(barrier_47, arg67)
+                # producer acquire for p0
+                tlx.barrier_wait(producer_p0, phase)
                 tlx.local_store(view_8, p, tlx.storage_kind.tmem)
-                tlx.barrier_arrive(barrier_49, 1)
-                val_141 = arg65 * val_136 + val_137  # new value for l_i
+                # producer commit for p0
+                tlx.barrier_arrive(producer_commit_p0, 1)
+                l_i = l_i * val_136 + val_137  # new value for l_i
 
-                arg65 = val_141
-                arg66 = m_ij
-                arg67 = arg67 ^ 1
-                arg68 = val_126
-                arg69 = val_125
-        tlx.local_store(buffer_84, arg65)
-        tlx.local_store(buffer_83, arg66)
+                m_i = m_ij
+                accum_cnt_m_i = accum_cnt_m_i + 2
+                accum_cnt = accum_cnt + 1
+            tlx.local_store(buffer_l_i0_final, l_i)
+            tlx.local_store(buffer_m_i0_final, m_i)
 
         with tlx.async_task(num_warps=4):  # softmax1
-            arg65 = cst_10
-            arg66 = cst_9
-            arg67, arg68, arg69 = 0, 0, 0
+            l_i = cst_10
+            m_i = cst_9
+            accum_cnt_m_i = 0
+            accum_cnt = 0
             for start_n in tl.range(lo, hi, BLOCK_N):
-                view_1 = tlx.local_view(barrier_51, 0)
-                tlx.barrier_wait(view_1, arg67)
-                view_2 = tlx.local_view(result_4, 0)
+                bufIdx, phase = _get_bufidx_phase(accum_cnt, 1)
+                view_1 = tlx.local_view(producer_commit_qk1, bufIdx)
+                tlx.barrier_wait(view_1, phase)
+                view_2 = tlx.local_view(result_4, bufIdx)
                 result_14 = tlx.local_load(view_2, tlx.storage_kind.tmem)
-                view_3 = tlx.local_view(barrier_53, 0)
+                view_3 = tlx.local_view(producer_qk1, bufIdx)
                 tlx.barrier_arrive(view_3, 1)
 
-                m_ij = tl.maximum(arg66, tl.max(result_14, 1) * qk_scale)
+                m_ij = tl.maximum(m_i, tl.max(result_14, 1) * qk_scale)
 
-                val_122 = arg68 + 1
-                val_125 = arg69 ^ 1 if val_122 == 3 else arg69
-                val_126 = 1 if val_122 == 3 else val_122
-                view_4 = tlx.local_view(buffer_73, val_126)
-                view_5 = tlx.local_view(barrier_74, val_126)
-                view_6 = tlx.local_view(barrier_75, val_126)
-                tlx.barrier_wait(view_6, val_125)
+                # need to store m_i for correction to use
+                bufIdx_m_i, phase_m_i = _get_bufidx_phase(accum_cnt_m_i, NUM_MI_BUFFER)
+                view_14 = tlx.local_view(buffer_m_i1, bufIdx_m_i)
+                view_15 = tlx.local_view(consumer_m_i1, bufIdx_m_i)
+                view_16 = tlx.local_view(consumer_release_m_i1, bufIdx_m_i)
+                tlx.barrier_wait(view_16, phase_m_i)
+                tlx.local_store(view_14, m_i)
+                tlx.barrier_arrive(view_15, 1)
+                # store m_ij
+                bufIdx_m_ij, phase_m_ij = _get_bufidx_phase(accum_cnt_m_i + 1, NUM_MI_BUFFER)
+                view_4 = tlx.local_view(buffer_m_i1, bufIdx_m_ij)
+                view_5 = tlx.local_view(consumer_m_i1, bufIdx_m_ij)
+                view_6 = tlx.local_view(consumer_release_m_i1, bufIdx_m_ij)
+                tlx.barrier_wait(view_6, phase_m_ij)
                 tlx.local_store(view_4, m_ij)
                 tlx.barrier_arrive(view_5, 1)
 
                 val_133 = result_14 * qk_scale - m_ij[:, None]
                 val_134 = tl.math.exp2(val_133)  # p
-                val_136 = tl.math.exp2(arg66 - m_ij)  # alpha
+                val_136 = tl.math.exp2(m_i - m_ij)  # alpha
                 val_137 = tl.sum(val_134, 1)  # l_ij
                 p = val_134.to(tl.float16)
                 view_7 = tlx.local_view(result_4, 0)
                 view_8 = tlx.local_reinterpret(view_7, tl.float16)
-                tlx.barrier_wait(barrier_59, arg67)
+                # producer acquire for p1
+                tlx.barrier_wait(producer_p1, phase)
                 tlx.local_store(view_8, p, tlx.storage_kind.tmem)
-                tlx.barrier_arrive(barrier_61, 1)
-                val_141 = arg65 * val_136 + val_137  # new value for l_i
+                # commit for p1
+                tlx.barrier_arrive(producer_commit_p1, 1)
+                l_i = l_i * val_136 + val_137  # new value for l_i
 
-                arg65 = val_141
-                arg66 = m_ij
-                arg67 = arg67 ^ 1
-                arg68 = val_126
-                arg69 = val_125
-        tlx.local_store(buffer_86, arg65)
-        tlx.local_store(buffer_85, arg66)
+                m_i = m_ij
+                accum_cnt_m_i = accum_cnt_m_i + 2
+                accum_cnt = accum_cnt + 1
+        tlx.local_store(buffer_l_i1_final, l_i)
+        tlx.local_store(buffer_m_i1_final, m_i)
 
     # epilogue
-    view_buffer_86 = tlx.local_view(buffer_86, 0)
-    val_88 = tlx.local_load(view_buffer_86)
-    view_buffer_85 = tlx.local_view(buffer_85, 0)
-    val_90 = tlx.local_load(view_buffer_85)
-    view_buffer_84 = tlx.local_view(buffer_84, 0)
-    val_91 = tlx.local_load(view_buffer_84)
-    view_buffer_83 = tlx.local_view(buffer_83, 0)
-    val_93 = tlx.local_load(view_buffer_83)
+    view_buffer_l_i1_final = tlx.local_view(buffer_l_i1_final, 0)
+    val_88 = tlx.local_load(view_buffer_l_i1_final)
+    view_buffer_m_i1_final = tlx.local_view(buffer_m_i1_final, 0)
+    val_90 = tlx.local_load(view_buffer_m_i1_final)
+    view_buffer_l_i0_final = tlx.local_view(buffer_l_i0_final, 0)
+    val_91 = tlx.local_load(view_buffer_l_i0_final)
+    view_buffer_m_i0_final = tlx.local_view(buffer_m_i0_final, 0)
+    val_93 = tlx.local_load(view_buffer_m_i0_final)
 
     val_95 = val_93 + tl.math.log2(val_91)
     m_ptrs = M + off_hz * N_CTX + offs_m0
