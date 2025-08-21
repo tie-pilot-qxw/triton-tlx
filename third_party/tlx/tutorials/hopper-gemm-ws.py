@@ -269,21 +269,23 @@ def matmul(a, b,):
     )
     return c
 
-triton.set_allocator(alloc_fn)
+@pytest.mark.skipif(
+    not is_cuda() or torch.cuda.get_device_capability()[0] != 9,
+    reason="Requires Hopper GPU",
+)
+def test_op():
+    triton.set_allocator(alloc_fn)
 
-torch.manual_seed(0)
+    torch.manual_seed(0)
 
-a = torch.randn((M, K), dtype=torch.float16, device=DEVICE)
-b = torch.randn((K, N), dtype=torch.float16, device=DEVICE)
+    a = torch.randn((M, K), dtype=torch.float16, device=DEVICE)
+    b = torch.randn((K, N), dtype=torch.float16, device=DEVICE)
 
-rtol = 1e-2 if is_hip_cdna2() else 0
-output = matmul(a, b,)
-output_ref = torch.matmul(a, b)
+    rtol = 1e-2 if is_hip_cdna2() else 0
+    output = matmul(a, b,)
+    output_ref = torch.matmul(a, b)
 
-if torch.allclose(output, output_ref, atol=1e-2, rtol=rtol):
-    print("✅ Triton and Torch match")
-else:
-    print("❌ Triton and Torch differ")
+    torch.allclose(output, output_ref, atol=1e-2, rtol=rtol)
 
 TORCH_HAS_FP8 = False
 
@@ -327,4 +329,9 @@ def benchmark(M, N, K, provider, fp8_inputs):
     return perf(ms), perf(max_ms), perf(min_ms)
 
 
-benchmark.run(show_plots=True, print_data=True, diff_col=True)
+if __name__ == "__main__":
+    if is_cuda() and torch.cuda.get_device_capability()[0] == 9:
+        print("Running benchmarks...")
+        benchmark.run(show_plots=True, print_data=True, diff_col=True)
+    else:
+        print("Skipping benchmarks, no Hopper GPU found.")
