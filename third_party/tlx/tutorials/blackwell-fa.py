@@ -96,8 +96,8 @@ def tlx_attention_fwd(
     buffer_q1 = tlx.local_view(buffers_q1, 0)
     barrier_q0 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
     barrier_q1 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    tlx.async_descriptor_load(desc_q, buffer_q0, [qo_offset_y, 0], barrier_q0)
-    tlx.async_descriptor_load(desc_q, buffer_q1, [qo_offset_y + BLOCK_M // 2, 0], barrier_q1)
+    tlx.async_descriptor_load(desc_q, buffer_q0, [qo_offset_y, 0], barrier_q0[0])
+    tlx.async_descriptor_load(desc_q, buffer_q1, [qo_offset_y + BLOCK_M // 2, 0], barrier_q1[0])
 
     # allocate NUM_STAGES buffers for k, v
     buffer_k = tlx.local_alloc((BLOCK_N, HEAD_DIM), tl.float16, NUM_STAGES)  # k
@@ -439,8 +439,8 @@ def tlx_attention_fwd(
                 m_i = m_ij
                 accum_cnt_m_i = accum_cnt_m_i + 2
                 accum_cnt = accum_cnt + 1
-        tlx.local_store(buffer_l_i1_final, l_i)
-        tlx.local_store(buffer_m_i1_final, m_i)
+            tlx.local_store(buffer_l_i1_final, l_i)
+            tlx.local_store(buffer_m_i1_final, m_i)
 
     # hitting assert _is_async_task(self, stmt) if not inside async_tasks
     # epilogue
@@ -462,7 +462,10 @@ def tlx_attention_fwd(
     acc = val_102.to(tl.float16)
     #buffer_104 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float16, 1)
     # fence_async_shared
-    tlx.async_descriptor_store(desc_o, acc, [qo_offset_y, 0])
+    c_buffers = tlx.local_alloc((BLOCK_M_SPLIT, HEAD_DIM), tl.float16, tl.constexpr(1))
+    c_smem = tlx.local_view(c_buffers, 0)
+    tlx.local_store(c_smem, acc)
+    tlx.async_descriptor_store(desc_o, c_smem, [qo_offset_y, 0])
     # tma_store_wait
 
     val_107 = val_90 + tl.math.log2(val_88)
@@ -474,7 +477,10 @@ def tlx_attention_fwd(
     acc = val_111.to(tl.float16)
     #buffer_113 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float16, 1)
     # fence_async_shared
-    tlx.async_descriptor_store(desc_o, acc, [qo_offset_y + BLOCK_M_SPLIT, 0])
+    c_buffers = tlx.local_alloc((BLOCK_M_SPLIT, HEAD_DIM), tl.float16, tl.constexpr(1))
+    c_smem = tlx.local_view(c_buffers, 0)
+    tlx.local_store(c_smem, acc)
+    tlx.async_descriptor_store(desc_o, c_smem, [qo_offset_y + BLOCK_M_SPLIT, 0])
     # tma_store_wait
 
 
