@@ -46,7 +46,7 @@ def _get_bufidx_phase(accum_cnt, NUM_BUFFERS):
 
 @triton.autotune(
     configs=get_cuda_autotune_config(),
-    key=['M', 'N', 'K'],
+    key=['M', 'Z', 'H', 'N_CTX', 'HEAD_DIM'],
 )
 @triton.jit
 def tlx_attention_fwd(
@@ -79,25 +79,13 @@ def tlx_attention_fwd(
     qo_offset_y = offset_y + start_m * BLOCK_M
 
     # initialize offsets
-    offs_m0 = start_m * BLOCK_M + tl.arange(0, BLOCK_M // 2)
-    offs_m1 = start_m * BLOCK_M + tl.arange(BLOCK_M // 2, BLOCK_M)
     #offs_n = tl.arange(0, BLOCK_N)
-
-    cst_9 = tl.zeros([BLOCK_M // 2], dtype=tl.float32) - float("inf")
-    cst_10 = tl.zeros([BLOCK_M // 2], dtype=tl.float32) + 1.0
-
-    qk_scale = sm_scale
-    qk_scale *= 1.44269504  # 1/log(2)
 
     # allocate buffers for q0, q1
     buffers_q0 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float16, 1)
     buffers_q1 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float16, 1)
-    buffer_q0 = tlx.local_view(buffers_q0, 0)
-    buffer_q1 = tlx.local_view(buffers_q1, 0)
     barrier_q0 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
     barrier_q1 = tlx.alloc_barriers(num_barriers=1, arrive_count=1)
-    tlx.async_descriptor_load(desc_q, buffer_q0, [qo_offset_y, 0], barrier_q0[0])
-    tlx.async_descriptor_load(desc_q, buffer_q1, [qo_offset_y + BLOCK_M // 2, 0], barrier_q1[0])
 
     # allocate NUM_STAGES buffers for k, v
     buffer_k = tlx.local_alloc((BLOCK_N, HEAD_DIM), tl.float16, NUM_STAGES)  # k
@@ -146,12 +134,12 @@ def tlx_attention_fwd(
     consumer_release_m_i1 = tlx.alloc_barriers(num_barriers=NUM_MI_BUFFER, arrive_count=1)
 
     # causal = False
-    lo, hi = 0, N_CTX
     with tlx.async_tasks():
         with tlx.async_task("default"):  # correction
             # set up arguments
             accum_cnt = 0
             accum_cnt_m_i = 0
+            lo, hi = 0, N_CTX
             for start_n in tl.range(lo, hi, BLOCK_N):
                 # data slice 0
                 # convert from ttng.wait_barrier to tlx.barrier_wait, trace the barrier and the phase
@@ -226,6 +214,7 @@ def tlx_attention_fwd(
                 accum_cnt_m_i = accum_cnt_m_i + 2
 
         with tlx.async_task(num_warps=1):  # gemm
+            lo, hi = 0, N_CTX
             # dot0_slice0
             view_1 = tlx.local_view(consumer_release_k, 0)
             view_2 = tlx.local_view(consumer_k, 0)
@@ -238,13 +227,13 @@ def tlx_attention_fwd(
             view_6 = tlx.local_view(result_3, 0)
             # dot0_slice1: q0 . k, producer_commit_qk0
             view_7 = tlx.local_view(producer_commit_qk0, 0)
-            tlx.async_dot(buffer_q0, view_4, view_6, mBarriers=[view_7])
+            tlx.async_dot(buffers_q0[0], view_4, view_6, mBarriers=[view_7])
             view_8 = tlx.local_view(producer_qk1, 0)
             tlx.barrier_wait(view_8, 0)  # has predicate?
             view_9 = tlx.local_view(result_4, 0)
             # producer_commit_qk1
             view_10 = tlx.local_view(producer_commit_qk1, 0)
-            tlx.async_dot(buffer_q1, view_4, view_9, mBarriers=[view_1, view_10])
+            tlx.async_dot(buffers_q1[0], view_4, view_9, mBarriers=[view_1, view_10])
 
             accum_cnt = 0
             for start_n in tl.range(lo, hi, BLOCK_N):
@@ -259,7 +248,7 @@ def tlx_attention_fwd(
                 buf, phase = _get_bufidx_phase(accum_cnt, 1)
                 tlx.barrier_wait(view_14, phase ^ 1)
                 tlx.barrier_wait(producer_commit_p0, phase)
-                view_15 = tlx.local_reinterpret(view_6, tl.float16)
+                view_15 = tlx.local_reinterpret(result_3[0], tl.float16)
                 view_16 = tlx.local_view(result_2, 0)
                 view_17 = tlx.local_view(producer_commit_acc0, 0)
                 view_t = tlx.local_view(producer_p0, 0)
@@ -268,13 +257,13 @@ def tlx_attention_fwd(
                 # dot0_slice0_iter_i+1: q0 . k
                 val_131, val_132 = _get_bufidx_phase(accum_cnt + 1, 2)
                 view_18 = tlx.local_view(consumer_release_k, val_131)
-                view_19 = tlx.local_view(consumer_k, val_131)
+                view_19 = tlx.local_view(consumer_k, 0)  #FIXME val_131)
                 view_20 = tlx.local_view(buffer_k, val_131)
                 view_21 = tlx.local_trans(view_20)
                 tlx.barrier_wait(view_19, val_132)  #, pred=start_n < val_121)
                 tlx.barrier_wait(view_5, phase ^ 1)  #, pred=start_n < val_121)
                 # commit qk0
-                tlx.async_dot(buffer_q0, view_21, view_6, mBarriers=[view_7])  #pred=start_n < val_121
+                tlx.async_dot(buffers_q0[0], view_21, result_3[0], mBarriers=[view_7])  #pred=start_n < val_121
                 view_22 = tlx.local_reinterpret(view_9, tl.float16)
                 view_23 = tlx.local_view(producer_commit_acc1_correction, 0)
                 tlx.barrier_wait(view_23, phase ^ 1)
@@ -282,32 +271,25 @@ def tlx_attention_fwd(
                 # dot1_slice1_iter_i: p1 . v
                 view_24 = tlx.local_view(result, 0)
                 view_25 = tlx.local_view(producer_commit_acc1, 0)
-                view_t = tlx.local_view(producer_p1, 0)
+                view_t2 = tlx.local_view(producer_p1, 0)  # FIXME
                 # release v, commit result
-                tlx.async_dot(view_22, view_13, view_24, mBarriers=[view_11, view_25, view_t])
+                tlx.async_dot(view_22, view_13, view_24, mBarriers=[view_11, view_25, view_t2])
                 tlx.barrier_wait(view_8, phase ^ 1)  #, pred=start_n < val_121)
                 # dot0_slice1_iter_i+1: q1 . k
                 # release k, commit qk1
-                tlx.async_dot(buffer_q1, view_21, view_9, mBarriers=[view_18, view_10])  #pred=start_n < val_121
+                tlx.async_dot(buffers_q1[0], view_21, view_9, mBarriers=[view_18, view_10])  #pred=start_n < val_121
 
                 accum_cnt = accum_cnt + 1
 
         with tlx.async_task(num_warps=1):  # load
+            lo, hi = 0, N_CTX
             # producer_acquire for q0: consumer_release
-            view_1 = tlx.local_view(consumer_release_k, 0)
-            tlx.barrier_wait(view_1, 0)
-            # producer_commit for q0: consumer_k
-            view_2 = tlx.local_view(consumer_k, 0)
-            tlx.barrier_expect_bytes(view_2, 32768)
-            view_3 = tlx.local_view(buffer_k, 0)
-            tlx.async_descriptor_load(desc_k, view_3, [offset_y, 0], view_2)
-
-            view_4 = tlx.local_view(consumer_release_k, 1)
-            tlx.barrier_wait(view_4, 0)  #, pred=hi > 128)
-            view_5 = tlx.local_view(consumer_k, 1)
-            tlx.barrier_expect_bytes(view_5, 32768)
-            view_6 = tlx.local_view(buffer_k, 1)
-            tlx.async_descriptor_load(desc_k, view_6, [offset_y + 128, 0], view_5)  #, pred=hi > 128)
+            buffer_q0 = tlx.local_view(buffers_q0, 0)
+            buffer_q1 = tlx.local_view(buffers_q1, 0)
+            tlx.barrier_expect_bytes(barrier_q0[0], 32768)
+            tlx.async_descriptor_load(desc_q, buffer_q0, [qo_offset_y, 0], barrier_q0[0])
+            tlx.barrier_expect_bytes(barrier_q1[0], 32768)
+            tlx.async_descriptor_load(desc_q, buffer_q1, [qo_offset_y + BLOCK_M // 2, 0], barrier_q1[0])
 
             arg70 = offset_y
             accum_cnt = 0
@@ -336,9 +318,15 @@ def tlx_attention_fwd(
                 accum_cnt = accum_cnt + 1
 
         with tlx.async_task(num_warps=4):  # softmax0
+            lo, hi = 0, N_CTX
             # inputs; m_i, qk
+            cst_9 = tl.zeros([BLOCK_M // 2], dtype=tl.float32) - float("inf")
+            cst_10 = tl.zeros([BLOCK_M // 2], dtype=tl.float32) + 1.0
             l_i = cst_10
             m_i = cst_9
+            qk_scale = sm_scale
+            qk_scale *= 1.44269504  # 1/log(2)
+
             accum_cnt_m_i = 0
             accum_cnt = 0
             for start_n in tl.range(lo, hi, BLOCK_N):
@@ -380,7 +368,7 @@ def tlx_attention_fwd(
                 tlx.barrier_wait(producer_p0, phase)
                 tlx.local_store(view_8, p)  #, tlx.storage_kind.tmem)
                 # producer commit for p0
-                tlx.barrier_arrive(producer_commit_p0, 1)
+                tlx.barrier_arrive(producer_commit_p0[0], 1)
                 l_i = l_i * val_136 + val_137  # new value for l_i
 
                 m_i = m_ij
@@ -390,16 +378,22 @@ def tlx_attention_fwd(
             tlx.local_store(buffer_m_i0_final, m_i)
 
         with tlx.async_task(num_warps=4):  # softmax1
+            lo, hi = 0, N_CTX
+            cst_9 = tl.zeros([BLOCK_M // 2], dtype=tl.float32) - float("inf")
+            cst_10 = tl.zeros([BLOCK_M // 2], dtype=tl.float32) + 1.0
             l_i = cst_10
             m_i = cst_9
+            qk_scale = sm_scale
+            qk_scale *= 1.44269504  # 1/log(2)
+
             accum_cnt_m_i = 0
             accum_cnt = 0
             for start_n in tl.range(lo, hi, BLOCK_N):
                 bufIdx, phase = _get_bufidx_phase(accum_cnt, 1)
                 view_1 = tlx.local_view(producer_commit_qk1, bufIdx)
                 tlx.barrier_wait(view_1, phase)
-                view_2 = tlx.local_view(result_4, bufIdx)
-                result_14 = tlx.local_load(view_2)  #, tlx.storage_kind.tmem)
+                # view_2 = tlx.local_view(result_4, bufIdx)
+                result_14 = tlx.local_load(result_4[bufIdx])  #, tlx.storage_kind.tmem)
                 view_3 = tlx.local_view(producer_qk1, bufIdx)
                 tlx.barrier_arrive(view_3, 1)
 
@@ -417,8 +411,8 @@ def tlx_attention_fwd(
                 bufIdx_m_ij, phase_m_ij = _get_bufidx_phase(accum_cnt_m_i + 1, NUM_MI_BUFFER)
                 view_4 = tlx.local_view(buffer_m_i1, bufIdx_m_ij)
                 view_5 = tlx.local_view(consumer_m_i1, bufIdx_m_ij)
-                view_6 = tlx.local_view(consumer_release_m_i1, bufIdx_m_ij)
-                tlx.barrier_wait(view_6, phase_m_ij)
+                # view_6 = tlx.local_view(consumer_release_m_i1, bufIdx_m_ij)
+                tlx.barrier_wait(consumer_release_m_i1[bufIdx_m_ij], phase_m_ij)
                 tlx.local_store(view_4, m_ij)
                 tlx.barrier_arrive(view_5, 1)
 
@@ -442,46 +436,49 @@ def tlx_attention_fwd(
             tlx.local_store(buffer_l_i1_final, l_i)
             tlx.local_store(buffer_m_i1_final, m_i)
 
-    # hitting assert _is_async_task(self, stmt) if not inside async_tasks
-    # epilogue
-    view_buffer_l_i1_final = tlx.local_view(buffer_l_i1_final, 0)
-    val_88 = tlx.local_load(view_buffer_l_i1_final)
-    view_buffer_m_i1_final = tlx.local_view(buffer_m_i1_final, 0)
-    val_90 = tlx.local_load(view_buffer_m_i1_final)
-    view_buffer_l_i0_final = tlx.local_view(buffer_l_i0_final, 0)
-    val_91 = tlx.local_load(view_buffer_l_i0_final)
-    view_buffer_m_i0_final = tlx.local_view(buffer_m_i0_final, 0)
-    val_93 = tlx.local_load(view_buffer_m_i0_final)
+        # hitting assert _is_async_task(self, stmt) if not inside async_tasks
+        # epilogue
+        with tlx.async_task(num_warps=4):  # epilogue
+            view_buffer_l_i1_final = tlx.local_view(buffer_l_i1_final, 0)
+            val_88 = tlx.local_load(view_buffer_l_i1_final)
+            view_buffer_m_i1_final = tlx.local_view(buffer_m_i1_final, 0)
+            val_90 = tlx.local_load(view_buffer_m_i1_final)
+            view_buffer_l_i0_final = tlx.local_view(buffer_l_i0_final, 0)
+            val_91 = tlx.local_load(view_buffer_l_i0_final)
+            view_buffer_m_i0_final = tlx.local_view(buffer_m_i0_final, 0)
+            val_93 = tlx.local_load(view_buffer_m_i0_final)
 
-    val_95 = val_93 + tl.math.log2(val_91)
-    m_ptrs = M + off_hz * N_CTX + offs_m0
-    tl.store(m_ptrs, val_95)
-    view_1 = tlx.local_view(result_2, 0)
-    result_5 = tlx.local_load(view_1)  #, tlx.storage_kind.tmem)
-    val_102 = result_5 / val_91[:, None]  # check layout
-    acc = val_102.to(tl.float16)
-    #buffer_104 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float16, 1)
-    # fence_async_shared
-    c_buffers = tlx.local_alloc((BLOCK_M_SPLIT, HEAD_DIM), tl.float16, tl.constexpr(1))
-    c_smem = tlx.local_view(c_buffers, 0)
-    tlx.local_store(c_smem, acc)
-    tlx.async_descriptor_store(desc_o, c_smem, [qo_offset_y, 0])
-    # tma_store_wait
+            val_95 = val_93 + tl.math.log2(val_91)
+            offs_m0 = start_m * BLOCK_M + tl.arange(0, BLOCK_M // 2)
+            m_ptrs = M + off_hz * N_CTX + offs_m0
+            tl.store(m_ptrs, val_95)
+            # view_1 = tlx.local_view(result_2, 0)
+            result_5 = tlx.local_load(result_2[0])  #, tlx.storage_kind.tmem)
+            val_102 = result_5 / val_91[:, None]  # check layout
+            acc = val_102.to(tl.float16)
+            #buffer_104 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float16, 1)
+            # fence_async_shared
+            c_buffers = tlx.local_alloc((BLOCK_M_SPLIT, HEAD_DIM), tl.float16, tl.constexpr(1))
+            c_smem = tlx.local_view(c_buffers, 0)
+            tlx.local_store(c_smem, acc)
+            tlx.async_descriptor_store(desc_o, c_smem, [qo_offset_y, 0])
+            # tma_store_wait
 
-    val_107 = val_90 + tl.math.log2(val_88)
-    m_ptrs = M + off_hz * N_CTX + offs_m1
-    tl.store(m_ptrs, val_107)
-    view_2 = tlx.local_view(result, 0)
-    result_6 = tlx.local_load(view_2)  #, tlx.storage_kind.tmem)
-    val_111 = result_6 / val_88[:, None]  # check layout
-    acc = val_111.to(tl.float16)
-    #buffer_113 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float16, 1)
-    # fence_async_shared
-    c_buffers = tlx.local_alloc((BLOCK_M_SPLIT, HEAD_DIM), tl.float16, tl.constexpr(1))
-    c_smem = tlx.local_view(c_buffers, 0)
-    tlx.local_store(c_smem, acc)
-    tlx.async_descriptor_store(desc_o, c_smem, [qo_offset_y + BLOCK_M_SPLIT, 0])
-    # tma_store_wait
+            val_107 = val_90 + tl.math.log2(val_88)
+            offs_m1 = start_m * BLOCK_M + tl.arange(BLOCK_M // 2, BLOCK_M)
+            m_ptrs = M + off_hz * N_CTX + offs_m1
+            tl.store(m_ptrs, val_107)
+            view_2 = tlx.local_view(result, 0)
+            result_6 = tlx.local_load(view_2)  #, tlx.storage_kind.tmem)
+            val_111 = result_6 / val_88[:, None]  # check layout
+            acc = val_111.to(tl.float16)
+            #buffer_113 = tlx.local_alloc((BLOCK_M // 2, HEAD_DIM), tl.float16, 1)
+            # fence_async_shared
+            c_buffers = tlx.local_alloc((BLOCK_M_SPLIT, HEAD_DIM), tl.float16, tl.constexpr(1))
+            c_smem = tlx.local_view(c_buffers, 0)
+            tlx.local_store(c_smem, acc)
+            tlx.async_descriptor_store(desc_o, c_smem, [qo_offset_y + BLOCK_M_SPLIT, 0])
+            # tma_store_wait
 
 
 class _attention(torch.autograd.Function):
