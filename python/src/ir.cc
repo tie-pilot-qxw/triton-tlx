@@ -45,6 +45,8 @@
 
 #include "llvm/ADT/SmallVector.h"
 
+typedef int AsyncTaskId;
+
 void setAsyncTaskIds(mlir::Operation *op,
                      llvm::ArrayRef<AsyncTaskId> asyncTaskIds) {
   llvm::SmallVector<AsyncTaskId> sortedAsyncTaskIds(asyncTaskIds.begin(),
