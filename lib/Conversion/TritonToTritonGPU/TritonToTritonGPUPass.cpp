@@ -4,7 +4,7 @@
 #include "mlir/IR/Verifier.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
-#include "third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h"
+#include "proton/Dialect/include/Dialect/Proton/IR/Dialect.h"
 #include "third_party/tlx/dialect/include/IR/Dialect.h"
 #include "triton/Conversion/TritonToTritonGPU/Passes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -622,11 +622,8 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       TritonExpandDimsPattern,
       TritonTransPattern,
       TritonDotPattern,
-<<<<<<< HEAD
       TritonMapElementwisePattern,
-=======
       TritonWarpSpecializePattern,
->>>>>>> 130097e5f ([TLX-rebase][1/2] Resolve merge conflicts without running tests)
       GatherScatterOpPattern<DescriptorGatherOp>,
       GatherScatterOpPattern<DescriptorScatterOp>,
       GenericOpPattern<triton::LoadOp>,
@@ -651,19 +648,7 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<triton::nvidia_gpu::WarpGroupDotWaitOp>,
       TritonFuncOpPattern>(typeConverter, context);
 }
-<<<<<<< HEAD
-=======
-// Proton patterns
-// NOTE: Because Proton's inputs are scalars and not tensors this conversion
-// isn't strictly necessary however you could envision a case where we pass in
-// tensors in for Triton object specific tracing operations in which case we
-// would need to fill in the OpConversionPattern
-void populateProtonPatterns(TritonGPUTypeConverter &typeConverter,
-                            RewritePatternSet &patterns) {
-  MLIRContext *context = patterns.getContext();
-  patterns.add<GenericOpPattern<triton::proton::RecordOp>>(typeConverter,
-                                                           context);
-}
+
 // TLX patterns
 // NOTE: Because Proton's inputs are scalars and not tensors this conversion
 // isn't strictly necessary however you could envision a case where we pass in
@@ -676,7 +661,7 @@ void populateTLXPatterns(TritonGPUTypeConverter &typeConverter,
   patterns.add<GenericOpPattern<triton::tlx::ReleaseLayoutOp>>(typeConverter,
                                                            context);
 }
->>>>>>> 130097e5f ([TLX-rebase][1/2] Resolve merge conflicts without running tests)
+
 //
 // SCF patterns
 //
@@ -924,11 +909,7 @@ public:
     populateArithPatternsAndLegality(typeConverter, patterns, target);
     populateMathPatternsAndLegality(typeConverter, patterns, target);
     populateTritonPatterns(typeConverter, patterns, numCTAs);
-<<<<<<< HEAD
-=======
-    populateProtonPatterns(typeConverter, patterns);
     populateTLXPatterns(typeConverter, patterns);
->>>>>>> 130097e5f ([TLX-rebase][1/2] Resolve merge conflicts without running tests)
     // TODO: can we use
     //    mlir::scf::populateSCFStructurealTypeConversionsAndLegality(...) here?
     populateSCFPatterns(typeConverter, patterns);

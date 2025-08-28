@@ -208,7 +208,6 @@ LogicalResult LayoutForwardPropagation::visitOperation(
     return success();
 
   auto isScalar = [](Type type) { return type.isIntOrIndexOrFloat(); };
-  auto memDescSubviewOp = cast<triton::gpu::MemDescSubviewOp>(op);
   for (const auto [operandIdx, operandLattice] : llvm::enumerate(operands)) {
     if (isScalar(op->getOperand(operandIdx).getType()))
       continue;
