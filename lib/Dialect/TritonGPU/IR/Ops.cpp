@@ -718,17 +718,19 @@ LogicalResult MemDescIndexOp::verify() {
   if (srcTy.getElementType() != dstTy.getElementType()) {
     return emitError("result element type must match desc element type");
   }
-  // memdesc_index reduces rank by 1 and preserves the trailing shape.
-  bool correctRank = srcTy.getRank() == dstTy.getRank() + 1;
+  bool is1D =
+      srcTy.getRank() == 1 && dstTy.getRank() == 1 && dstTy.getDimSize(0) == 1;
+  bool correctRank = srcTy.getRank() == dstTy.getRank() + 1 || is1D;
   if (!correctRank) {
-    return emitError("result rank must be input rank - 1");
+    return emitError(
+        "result rank must be less than or equal to input rank or 1D -> 1D");
   }
   if (srcTy.getAllocShape().size() != srcTy.getRank()) {
     return emitError("We don't allow taking memdesc_index of a memdesc_index");
   }
 
-  if (ArrayRef(srcTy.getShape()).take_back(dstTy.getRank()) !=
-      dstTy.getShape()) {
+  if (!is1D && ArrayRef(srcTy.getShape()).take_back(dstTy.getRank()) !=
+                   dstTy.getShape()) {
     return emitError("result shape must equal to srcShape[1:]");
   }
 

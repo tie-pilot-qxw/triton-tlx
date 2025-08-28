@@ -19,7 +19,28 @@ namespace tlx = triton::tlx;
 void init_triton_tlx_ir(py::module &&m) {
   auto *builder_cls = ir::getBuilderClass();
   builder_cls
-      ->def("create_require_layout",
+      ->def(
+          "create_memdesc_subview",
+          [](TritonOpBuilder &self, Value localAlloc,
+             Value bufferIdx) -> mlir::Value {
+            auto localAllocType = cast<ttg::MemDescType>(localAlloc.getType());
+            auto localAllocShape = localAllocType.getShape();
+            auto context = self.getBuilder().getContext();
+            Type memDescType;
+            if (localAllocShape.size() == 1) {
+              memDescType = ttg::MemDescType::get(
+                  {1}, localAllocType.getElementType(),
+                  localAllocType.getEncoding(), localAllocType.getMemorySpace(),
+                  /*mutableMemory=*/localAllocType.getMutableMemory());
+            } else {
+              memDescType = ttg::MemDescType::get(
+                  localAllocShape.drop_front(), localAllocType.getElementType(),
+                  localAllocType.getEncoding(), localAllocType.getMemorySpace(),
+                  /*mutableMemory=*/localAllocType.getMutableMemory());
+            }
+            return self.create<ttg::MemDescIndexOp>(memDescType, localAlloc, bufferIdx);
+          })
+      .def("create_require_layout",
             [](TritonOpBuilder &self, Value &v, Attribute &encoding) -> Value {
               Type newType;
               if (auto type = dyn_cast<ttg::MemDescType>(v.getType())) {
@@ -244,7 +265,7 @@ void init_triton_tlx_ir(py::module &&m) {
                Value idx = self.getBuilder().create<arith::ConstantIntOp>(
                    bufferViews.getLoc(), i, 32);
                mlir::Value buf =
-                   self.create<mlir::triton::gpu::MemDescSubviewOp>(
+                   self.create<ttg::MemDescIndexOp>(
                        singleBarrierMemDescType, bufferViews, idx);
 
                // Initialize mbarrier at buf view
@@ -337,7 +358,7 @@ void init_triton_tlx_ir(py::module &&m) {
                // TODO: find the defining op properly
                auto definingOp = value.getDefiningOp();
                if (auto subviewOp =
-                       dyn_cast<ttg::MemDescSubviewOp>(definingOp)) {
+                       dyn_cast<ttg::MemDescIndexOp>(definingOp)) {
                  value = subviewOp.getSrc();
                } else {
                  auto requireLayoutOp =

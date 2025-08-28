@@ -77,7 +77,7 @@ def test_async_tasks(BLOCK_SIZE, device):
     # Check that the replica_id is correctly passed to non-default regions
     # TTIR/TTGIR should be something like:
     #  partition0(...) {
-    #   %cst = arith.constant dense<0.000000e+00> : tensor<1024xf32, #blocked>
+    #   %a1 = arith.constant dense<0.000000e+00> : tensor<1024xf32, #blocked>
     #   ...
     #   %13 = arith.addf %9, %cst
     #   ...}
@@ -87,7 +87,7 @@ def test_async_tasks(BLOCK_SIZE, device):
     #   %13 = arith.addf %9, %cst
     #   %14 = arith.subf %12, %cst
     #   ...}
-    pattern_cst = (r'cst = arith.constant dense\<.*\>')
+    pattern_cst = (r'= arith.constant dense\<.*\>')
     found = re.findall(pattern_cst, ttgir)
     assert len(found) == 2, "Expected 2 cst by calling `tlx.async_task_replica_id()` in two regions"
     assert found[0] != found[1], "Two matches MUST be different"
@@ -141,7 +141,7 @@ def test_local_load(BLOCK_SIZE, device):
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
     kernel = local_load[grid](x, y, output, n_elements, BLOCK_SIZE)
     assert kernel.asm["ttgir"].count("ttg.local_alloc") == 1
-    assert kernel.asm["ttgir"].count("ttg.memdesc_subview") == 2
+    assert kernel.asm["ttgir"].count("ttg.memdesc_index") == 2
     assert kernel.asm["ttgir"].count("ttg.async_copy_global_to_local") == 2
     assert kernel.asm["ttgir"].count("ttg.async_commit_group") == 1
     assert kernel.asm["ttgir"].count("ttg.async_wait") == 1
@@ -192,7 +192,7 @@ def test_load_store_smem_with_tl_load(BLOCK_SIZE, device):
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
     kernel = smem_reg_store_load[grid](x, y, output, n_elements, BLOCK_SIZE)
     assert kernel.asm["ttgir"].count("ttg.local_alloc") == 1
-    assert kernel.asm["ttgir"].count("ttg.memdesc_subview") == 2
+    assert kernel.asm["ttgir"].count("ttg.memdesc_index") == 2
     assert kernel.asm["ttgir"].count("ttg.local_load") == 2
     assert kernel.asm["ttgir"].count("ttg.local_store") == 2
     torch.testing.assert_close(x + y, output)
@@ -244,7 +244,7 @@ def test_local_store(BLOCK_SIZE, device):
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
     kernel = local_load_store[grid](x, y, output, n_elements, BLOCK_SIZE)
     assert kernel.asm["ttgir"].count("ttg.local_alloc") == 1
-    assert kernel.asm["ttgir"].count("ttg.memdesc_subview") == 3
+    assert kernel.asm["ttgir"].count("ttg.memdesc_index") == 3
     assert kernel.asm["ttgir"].count("ttg.async_copy_global_to_local") == 2
     assert kernel.asm["ttgir"].count("ttg.async_commit_group") == 1
     assert kernel.asm["ttgir"].count("ttg.async_wait") == 1
@@ -1404,6 +1404,10 @@ def test_tmem_op_func(BLOCK_SIZE_M, BLOCK_SIZE_N, device):
 def math_kernel(x):
     return x * 0.5 * (1 + (0.7978845608 * x * (1.0 + 0.044715 * x * x)))
 
+@pytest.mark.skipif(
+    not is_cuda() or torch.cuda.get_device_capability()[0] < 10,
+    reason="Requires compute capability >= 10 for NV",
+)
 @pytest.mark.parametrize("BLOCK_SIZE", [(64)])
 def test_inline_tmem(BLOCK_SIZE, device):
     @triton.jit

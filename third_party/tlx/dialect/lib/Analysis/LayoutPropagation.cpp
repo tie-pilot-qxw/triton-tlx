@@ -204,7 +204,7 @@ LogicalResult LayoutForwardPropagation::visitOperation(
     Operation *op, ArrayRef<const LayoutEncodingLattice *> operands,
     ArrayRef<LayoutEncodingLattice *> results) {
 
-  if (!isa<triton::gpu::MemDescSubviewOp>(op))
+  if (!isa<triton::gpu::MemDescIndexOp>(op))
     return success();
 
   auto isScalar = [](Type type) { return type.isIntOrIndexOrFloat(); };

@@ -33,7 +33,9 @@ def async_task_replica_id(_semantic=None):
                ) > 0, "async_task_replica_id must be called inside an async region where the stack must be non-empty"
     return tl.constexpr(region_replica_id_stack[-1])
 
-def dtype_of(v, _builder=None) -> tl.dtype:
+
+@tl.builtin
+def dtype_of(v, _semantic=None) -> tl.dtype:
     """
     Returns the element type of a given tensor or tensor descriptor.
     """
