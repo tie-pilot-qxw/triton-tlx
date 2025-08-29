@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 import triton.language.extra.tlx as tlx
-from triton._internal_testing import is_cuda
+from triton._internal_testing import is_blackwell
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
@@ -173,7 +173,7 @@ def matmul(a, b):
     return c
 
 @pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] != 10,
+    not is_blackwell(),
     reason="Requires Blackwell GPU",
 )
 def test_op():
@@ -221,8 +221,8 @@ def benchmark(M, N, K, provider):
 
 
 if __name__ == "__main__":
-    if is_cuda() and torch.cuda.get_device_capability()[0] == 10:
+    if is_blackwell():
         print("Running benchmarks...")
-        benchmark.run(show_plots=True, print_data=True)
+        benchmark.run(show_plots=False, print_data=True)
     else:
         print("Skipping benchmarks, no Blackwell GPU found.")

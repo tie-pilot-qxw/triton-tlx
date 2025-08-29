@@ -4,17 +4,9 @@ import pytest
 import triton
 import triton.language as tl
 import triton.language.extra.tlx as tlx
+from triton._internal_testing import is_cuda,is_hip_cdna2
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
-
-
-def is_cuda():
-    return triton.runtime.driver.active.get_current_target().backend == "cuda"
-
-
-def is_hip_cdna2():
-    target = triton.runtime.driver.active.get_current_target()
-    return target.backend == 'hip' and target.arch == 'gfx90a'
 
 
 def get_cuda_autotune_config():

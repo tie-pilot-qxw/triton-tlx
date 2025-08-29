@@ -3,16 +3,13 @@ import torch
 import re
 import triton
 import triton.language as tl
-from triton._internal_testing import is_cuda
+from triton._internal_testing import is_hopper_or_newer,is_blackwell,is_hopper
 import triton.language.extra.tlx as tlx
 from typing import Optional
 import traceback
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 @pytest.mark.parametrize("BLOCK_SIZE", [(1024)])
 def test_async_tasks(BLOCK_SIZE, device):
 
@@ -98,10 +95,7 @@ def test_async_tasks(BLOCK_SIZE, device):
     torch.testing.assert_close(output2, ref_out2, check_dtype=False)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 @pytest.mark.parametrize("BLOCK_SIZE", [(64)])
 def test_local_load(BLOCK_SIZE, device):
 
@@ -197,10 +191,7 @@ def test_load_store_smem_with_tl_load(BLOCK_SIZE, device):
     assert kernel.asm["ttgir"].count("ttg.local_store") == 2
     torch.testing.assert_close(x + y, output)
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 @pytest.mark.parametrize("BLOCK_SIZE", [(64)])
 def test_local_store(BLOCK_SIZE, device):
 
@@ -253,10 +244,7 @@ def test_local_store(BLOCK_SIZE, device):
     torch.testing.assert_close(x + y, output)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 10,
-    reason="Requires compute capability >= 10 for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 @pytest.mark.parametrize("BLOCK_SIZE", [(64)])
 def test_tmem_alloc_index(BLOCK_SIZE, device):
 
@@ -273,10 +261,7 @@ def test_tmem_alloc_index(BLOCK_SIZE, device):
     assert kerenl_info.asm["ttgir"].count("kernel") == 1
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 10,
-    reason="Requires compute capability >= 10 for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 @pytest.mark.parametrize("BLOCK_SIZE_M, BLOCK_SIZE_N", [(64, 64), (64, 8), (128, 16)])
 def test_tmem_load_store(BLOCK_SIZE_M, BLOCK_SIZE_N, device):
 
@@ -317,10 +302,7 @@ def test_tmem_load_store(BLOCK_SIZE_M, BLOCK_SIZE_N, device):
     torch.testing.assert_close(x, ref_out)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 10,
-    reason="Requires compute capability >= 10 for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 @pytest.mark.parametrize("BLOCK_SIZE_M, BLOCK_SIZE_N", [(128, 64)])
 def test_tmem_subslice(BLOCK_SIZE_M, BLOCK_SIZE_N, device):
 
@@ -407,10 +389,7 @@ def test_thread_id(device):
     torch.testing.assert_close(output, expected_output)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 @pytest.mark.parametrize("BLOCK_SIZE", [(64)])
 def test_async_wait(BLOCK_SIZE, device):
 
@@ -469,10 +448,7 @@ def test_async_wait(BLOCK_SIZE, device):
     torch.testing.assert_close(x, output)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 def test_local_trans(device):
 
     @triton.jit
@@ -515,10 +491,7 @@ def test_local_trans(device):
     torch.testing.assert_close(y, x.T)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 10,
-    reason="Requires compute capability >= 10 for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 def test_local_reinterpret(device):
 
     @triton.jit
@@ -589,10 +562,7 @@ def test_local_reinterpret(device):
     torch.testing.assert_close(x16, y16)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] != 9,
-    reason="Requires compute capability == 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper(), reason="Need Hopper")
 def test_async_dot(device):
 
     @triton.jit
@@ -673,10 +643,7 @@ def test_async_dot(device):
     torch.testing.assert_close(z, z_ref)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] != 10,
-    reason="Requires compute capability == 10 (Blackwell) for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 def test_async_dot_blackwell(device):
     """
     Test D = A*B + A*B
@@ -749,10 +716,7 @@ def test_async_dot_blackwell(device):
     torch.testing.assert_close(z, ref_out)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] != 10,
-    reason="Requires compute capability == 10 (Blackwell) for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 def test_async_dot_blackwell_not_use_d(device):
     """
     Test D = A*B
@@ -823,10 +787,7 @@ def test_async_dot_blackwell_not_use_d(device):
     torch.testing.assert_close(z2, xy + xy)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] != 10,
-    reason="Requires compute capability == 10 (Blackwell) for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 def test_tcgen05_commit(device):
     """
     Test tcgen05.commit tracking multiple tcgen05 ops
@@ -914,10 +875,7 @@ def test_tcgen05_commit(device):
     torch.testing.assert_close(z1, ref_out)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] != 10,
-    reason="Requires compute capability == 10 (Blackwell) for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 def test_async_dot_blackwell_tmem_A(device):
     """
     Test D = A*B where A is in TMEM instead of SMEM
@@ -1106,10 +1064,7 @@ def run_tlx_square(func, BLOCK_SIZE, device):
 
 
 # Unit test for arrive/wait
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 @pytest.mark.parametrize("BLOCK_SIZE", [(1024)])
 # def test_mbarriers(BLOCK_SIZE, device):
 def test_wait_arrive_non_ws(BLOCK_SIZE, device):
@@ -1121,10 +1076,7 @@ def test_wait_arrive_non_ws(BLOCK_SIZE, device):
         ttgir.count("ttng.barrier_expect") == 0) and (ttgir.count("ttng.arrive_barrier") == 3), f"TTGIR {ttgir}"
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 @pytest.mark.parametrize("BLOCK_SIZE", [(1024)])
 # def test_mbarriers(BLOCK_SIZE, device):
 def test_wait_arrive_ws(BLOCK_SIZE, device):
@@ -1138,10 +1090,7 @@ def test_wait_arrive_ws(BLOCK_SIZE, device):
                 == 2) and (ttgir.count("default {") == 1) and (ttgir.count("partition0") == 1), f"TTGIR {ttgir}"
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 @pytest.mark.parametrize("BLOCK_SIZE", [(1024)])
 # def test_mbarriers(BLOCK_SIZE, device):
 def test_named_wait_arrive(BLOCK_SIZE, device):
@@ -1205,10 +1154,7 @@ def test_named_wait_arrive(BLOCK_SIZE, device):
     torch.testing.assert_close(output2, ref_out2, check_dtype=False)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 def test_descriptor_load(device):
 
     def alloc_fn(size: int, align: int, stream: Optional[int]):
@@ -1262,10 +1208,7 @@ def test_descriptor_load(device):
     torch.testing.assert_close(x, y)
 
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 9,
-    reason="Requires compute capability >= 9 for NV",
-)
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 def test_local_gather(device):
 
     def alloc_fn(size: int, align: int, stream: Optional[int]):
@@ -1372,10 +1315,7 @@ def _global_tmem_func(
 
     tl.store(x_ptr_offsets, b)
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 10,
-    reason="Requires compute capability >= 10 for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 @pytest.mark.parametrize("BLOCK_SIZE_M, BLOCK_SIZE_N", [(64, 64)])
 def test_tmem_op_func(BLOCK_SIZE_M, BLOCK_SIZE_N, device):
 
@@ -1404,10 +1344,7 @@ def test_tmem_op_func(BLOCK_SIZE_M, BLOCK_SIZE_N, device):
 def math_kernel(x):
     return x * 0.5 * (1 + (0.7978845608 * x * (1.0 + 0.044715 * x * x)))
 
-@pytest.mark.skipif(
-    not is_cuda() or torch.cuda.get_device_capability()[0] < 10,
-    reason="Requires compute capability >= 10 for NV",
-)
+@pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 @pytest.mark.parametrize("BLOCK_SIZE", [(64)])
 def test_inline_tmem(BLOCK_SIZE, device):
     @triton.jit

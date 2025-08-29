@@ -17,11 +17,9 @@ import pytest
 import triton
 import triton.language as tl
 import triton.language.extra.tlx as tlx
+from triton._internal_testing import is_hopper_or_newer
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
-
-def is_cuda():
-    return triton.runtime.driver.active.get_current_target().backend == "cuda"
 
 @triton.jit
 def add2_kernel(
@@ -101,8 +99,8 @@ def add2_warp_specialized(x: torch.Tensor, y: torch.Tensor, a: torch.Tensor, b: 
 def dual_add(x, y, a, b):
     return x + y, a + b
 
-@pytest.mark.skipUnless(
-    is_cuda() and torch.cuda.get_device_capability()[0] >= 9,
+@pytest.mark.skipif(
+    not is_hopper_or_newer(),
     reason="Requires Hopper GPU or above",
 )
 def test_op():
@@ -168,4 +166,5 @@ if __name__ == "__main__":
     # %%
     # We can now run the decorated function above. Pass `print_data=True` to see the performance number, `show_plots=True` to plot them, and/or
     # `save_path='/path/to/results/' to save them to disk along with raw CSV data:
-    benchmark.run(print_data=True, show_plots=True)
+    if is_hopper_or_newer():
+        benchmark.run(print_data=True, show_plots=True)
