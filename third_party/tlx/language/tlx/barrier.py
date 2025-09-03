@@ -27,7 +27,7 @@ def alloc_barriers(
         layout.numCTAOrder,
     )
     return tlx.mbarrier(_semantic.builder.create_alloc_barriers(num_barriers.value, arrive_count.value, layout_handle),
-                        num_barriers, layout)
+                        num_barriers, layout, _semantic)
 
 
 @tl.builtin
@@ -68,7 +68,9 @@ def barrier_wait(
     if isinstance(phase, tl.tensor):
         _semantic.builder.create_barrier_wait(bar.handle, phase.handle, pred_handle)
     elif isinstance(phase, tl.constexpr):
-        _semantic.builder.create_barrier_wait(bar.handle, _semantic._convert_elem_to_ir_value(phase.value, require_i64=False), pred_handle)
+        _semantic.builder.create_barrier_wait(bar.handle,
+                                              _semantic._convert_elem_to_ir_value(phase.value, require_i64=False),
+                                              pred_handle)
     else:
         raise RuntimeError(f"`phase` is in type {type(phase)} (must be either `tl.tensor` or `tl.constexpr`)")
 
