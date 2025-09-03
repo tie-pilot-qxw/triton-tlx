@@ -98,14 +98,7 @@ To bypass, rewrite it to `local_alloc(..., num=tl.constexpr(2))` or `local_alloc
     else:
         tensor_handle = _semantic.builder.create_tmem_alloc(full_shape, elem_type, layout_handle)
 
-    return tlx.buffered_tensor(
-        tensor_handle,
-        dtype,
-        unwrapped_shape,
-        unwrapped_num,
-        storage,
-        layout,
-    )
+    return tlx.buffered_tensor(tensor_handle, dtype, unwrapped_shape, unwrapped_num, storage, layout, _semantic)
 
 
 # overload declarations just to make linter happy
@@ -113,7 +106,7 @@ To bypass, rewrite it to `local_alloc(..., num=tl.constexpr(2))` or `local_alloc
 def local_view(
     local_allocated_buffers: tlx.buffered_tensor,
     buffer_idx: int,
-    _builder=None,
+    _semantic=None,
 ) -> tlx.buffered_tensor:
     ...
 
@@ -122,7 +115,7 @@ def local_view(
 def local_view(
     local_allocated_buffers: tlx.mbarrier,
     buffer_idx: int,
-    _builder=None,
+    _semantic=None,
 ) -> tlx.mbarrier:
     ...
 
@@ -139,7 +132,7 @@ def local_view(
     buffer_idx = _semantic._convert_elem_to_ir_value(buffer_idx, require_i64=False)
     view_handle = _semantic.builder.create_memdesc_subview(local_allocated_buffers.handle, buffer_idx)
     if isinstance(local_allocated_buffers, tlx.mbarrier):
-        return tlx.mbarrier(view_handle, 1, local_allocated_buffers.type.layout)
+        return tlx.mbarrier(view_handle, 0, local_allocated_buffers.type.layout)
     else:
         return tlx.buffered_tensor(
             view_handle,
@@ -149,6 +142,14 @@ def local_view(
             local_allocated_buffers.type.storage,
             local_allocated_buffers.type.layout,
         )
+
+
+def _buffered_tensor_getitem(self, buffer_idx):
+    return local_view(self, buffer_idx, _semantic=self.type.semantic)
+
+
+tlx.buffered_tensor.__getitem__ = _buffered_tensor_getitem
+tlx.mbarrier.__getitem__ = _buffered_tensor_getitem
 
 
 @tl.builtin
@@ -354,8 +355,8 @@ def async_descriptor_load(
         pred_handle = _semantic.builder.get_int1(True)
     else:
         pred_handle = pred.handle
-    _semantic.builder.create_async_TMA_load(desc.handle, offsets, barrier.handle, pred_handle, result_handle, cache, eviction,
-                                   False)
+    _semantic.builder.create_async_TMA_load(desc.handle, offsets, barrier.handle, pred_handle, result_handle, cache,
+                                            eviction, False)
 
 
 @tl.builtin

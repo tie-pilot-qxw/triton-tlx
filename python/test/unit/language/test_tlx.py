@@ -3,7 +3,7 @@ import torch
 import re
 import triton
 import triton.language as tl
-from triton._internal_testing import is_hopper_or_newer,is_blackwell,is_hopper
+from triton._internal_testing import is_hopper_or_newer, is_blackwell, is_hopper
 import triton.language.extra.tlx as tlx
 from typing import Optional
 import traceback
@@ -115,14 +115,12 @@ def test_local_load(BLOCK_SIZE, device):
         y_ptr_offsets = y_ptr + offsets
 
         buffers = tlx.local_alloc((BLOCK_SIZE, ), tl.float32, 3)
-        buffer0 = tlx.local_view(buffers, 0)
-        buffer1 = tlx.local_view(buffers, 1)
-        tlx.async_load(x_ptr_offsets, buffer0, mask=mask)
-        tlx.async_load(y_ptr_offsets, buffer1, mask=mask)
+        tlx.async_load(x_ptr_offsets, buffers[0], mask=mask)
+        tlx.async_load(y_ptr_offsets, buffers[1], mask=mask)
         tlx.async_load_commit_group()
         tlx.async_load_wait_group(tl.constexpr(0))
-        x_local = tlx.local_load(buffer0)
-        y_local = tlx.local_load(buffer1)
+        x_local = tlx.local_load(buffers[0])
+        y_local = tlx.local_load(buffers[1])
         local_add = x_local + y_local
         tl.store(output_ptr + offsets, local_add, mask=mask)
 
@@ -141,6 +139,7 @@ def test_local_load(BLOCK_SIZE, device):
     assert kernel.asm["ttgir"].count("ttg.async_wait") == 1
     assert kernel.asm["ttgir"].count("ttg.local_load") == 2
     torch.testing.assert_close(x + y, output)
+
 
 # Tests tl.load->tlx_local_store->tlx_local_load
 # This is a smem load/store test variant that does not use
@@ -162,7 +161,7 @@ def test_load_store_smem_with_tl_load(BLOCK_SIZE, device):
         offsets = block_start + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_elements
 
-        smem_buffers = tlx.local_alloc((BLOCK_SIZE,), tl.float32, 3)
+        smem_buffers = tlx.local_alloc((BLOCK_SIZE, ), tl.float32, 3)
         x_smem = tlx.local_view(smem_buffers, 0)
         y_smem = tlx.local_view(smem_buffers, 1)
 
@@ -183,13 +182,14 @@ def test_load_store_smem_with_tl_load(BLOCK_SIZE, device):
     y = torch.rand(size, dtype=torch.float32, device=device)
     output = torch.empty_like(x)
     n_elements = x.numel()
-    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
     kernel = smem_reg_store_load[grid](x, y, output, n_elements, BLOCK_SIZE)
     assert kernel.asm["ttgir"].count("ttg.local_alloc") == 1
     assert kernel.asm["ttgir"].count("ttg.memdesc_index") == 2
     assert kernel.asm["ttgir"].count("ttg.local_load") == 2
     assert kernel.asm["ttgir"].count("ttg.local_store") == 2
     torch.testing.assert_close(x + y, output)
+
 
 @pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
 @pytest.mark.parametrize("BLOCK_SIZE", [(64)])
@@ -1315,6 +1315,7 @@ def _global_tmem_func(
 
     tl.store(x_ptr_offsets, b)
 
+
 @pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 @pytest.mark.parametrize("BLOCK_SIZE_M, BLOCK_SIZE_N", [(64, 64)])
 def test_tmem_op_func(BLOCK_SIZE_M, BLOCK_SIZE_N, device):
@@ -1344,13 +1345,15 @@ def test_tmem_op_func(BLOCK_SIZE_M, BLOCK_SIZE_N, device):
 def math_kernel(x):
     return x * 0.5 * (1 + (0.7978845608 * x * (1.0 + 0.044715 * x * x)))
 
+
 @pytest.mark.skipif(not is_blackwell(), reason="Need Blackwell")
 @pytest.mark.parametrize("BLOCK_SIZE", [(64)])
 def test_inline_tmem(BLOCK_SIZE, device):
+
     @triton.jit
     def kernel(y_ptr, BLOCK_SIZE: tl.constexpr):
         buffers = tlx.local_alloc((BLOCK_SIZE, BLOCK_SIZE), tl.float32, tl.constexpr(4), tlx.storage_kind.tmem)
-        buffer0 = tlx.local_view(buffers, 0)
+        buffer0 = buffers[0]
         x = tlx.local_load(buffer0)
         pid = tl.program_id(axis=0)
         offsets_i = tl.arange(0, BLOCK_SIZE)[:, None]
@@ -1358,7 +1361,6 @@ def test_inline_tmem(BLOCK_SIZE, device):
         offsets = offsets_i * BLOCK_SIZE + offsets_j
         y = math_kernel(x)
         tl.store(y_ptr + offsets, y)
-
 
     y = torch.rand((64, 64), dtype=torch.float32, device=device)
     grid = lambda meta: (1, )
