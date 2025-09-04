@@ -1,6 +1,7 @@
 add_triton_library(TLXIR
   Dialect.cpp
   Ops.cpp
+  Traits.cpp
 
   DEPENDS
   TLXTableGen

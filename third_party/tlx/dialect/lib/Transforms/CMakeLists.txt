@@ -2,6 +2,7 @@ add_triton_library(TritonTLXTransforms
   Fixup.cpp
   PropagateLayout.cpp
   InsertRequireLayout.cpp
+  RewriteLocalAlias.cpp
 
   DEPENDS
   TritonTLXTransformsIncGen

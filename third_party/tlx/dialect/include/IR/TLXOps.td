@@ -13,6 +13,7 @@ include "triton/Dialect/Triton/IR/TritonTypes.td"
 include "triton/Dialect/TritonGPU/IR/TritonGPUTypes.td"
 include "triton/Dialect/TritonGPU/IR/TritonGPUTypeInterfaces.td"
 include "TLXDialect.td"
+include "TLXInterfaces.td"
 
 
 class TLX_Op<string mnemonic, list<Trait> traits = []> :
@@ -42,6 +43,18 @@ def TLX_ReleaseLayoutOp : TLX_Op<"release_layout",
   let arguments = (ins TT_Tensor:$src);
 
   let results = (outs TT_Tensor:$result);
+
+  let assemblyFormat = "$src attr-dict `:` type($src) `->` type($result)";
+}
+
+def TLX_LocalAliasOp : TLX_Op<"local_alias",
+                                 [SameOperandAndResultMemorySpace,
+                                  Pure]> {
+  let summary = "Create an alias of a local memory buffer";
+
+  let arguments = (ins TTG_TensorOrMemDesc:$src);
+
+  let results = (outs TTG_TensorOrMemDesc:$result);
 
   let assemblyFormat = "$src attr-dict `:` type($src) `->` type($result)";
 }
