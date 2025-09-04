@@ -218,11 +218,12 @@ class HIPBackend(BaseBackend):
         # Maintain the order of the following three passes
         # for graphs with tlx.local_load -> tt.dot,
         # dot op specifics from add_accelerate_matmul are required
-        # to create the require_layout before tlx.local_local. 
+        # to create the require_layout before tlx.local_local.
         # This layout will then be propagated to the tlx.local_alloc
         amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack)
         tlx.tlx_passes.add_tlx_insert_require_layout(pm)
         tlx.tlx_passes.add_tlx_propagate_layout(pm)
+        tlx.tlx_passes.add_tlx_rewrite_local_alias(pm)
 
         passes.ttgpuir.add_remove_layout_conversions(pm)
         amd.passes.ttgpuir.add_optimize_epilogue(pm)

@@ -41,21 +41,21 @@ void init_triton_tlx_ir(py::module &&m) {
             return self.create<ttg::MemDescIndexOp>(memDescType, localAlloc, bufferIdx);
           })
       .def("create_require_layout",
-            [](TritonOpBuilder &self, Value &v, Attribute &encoding) -> Value {
-              Type newType;
-              if (auto type = dyn_cast<ttg::MemDescType>(v.getType())) {
-                newType = ttg::MemDescType::get(
-                    type.getShape(), type.getElementType(), encoding,
-                    type.getMemorySpace(), type.getMutableMemory());
-                return self.create<tlx::RequireLayoutOp>(newType, v);
-              } else if (auto type = dyn_cast<RankedTensorType>(v.getType())) {
-                newType = RankedTensorType::get(
-                    type.getShape(), type.getElementType(), encoding);
-                return self.create<tlx::RequireLayoutOp>(newType, v);
-              } else {
-                throw std::runtime_error("Unsupported type");
-              }
-            })
+           [](TritonOpBuilder &self, Value &v, Attribute &encoding) -> Value {
+             Type newType;
+             if (auto type = dyn_cast<ttg::MemDescType>(v.getType())) {
+               newType = ttg::MemDescType::get(
+                   type.getShape(), type.getElementType(), encoding,
+                   type.getMemorySpace(), type.getMutableMemory());
+               return self.create<tlx::RequireLayoutOp>(newType, v);
+             } else if (auto type = dyn_cast<RankedTensorType>(v.getType())) {
+               newType = RankedTensorType::get(type.getShape(),
+                                               type.getElementType(), encoding);
+               return self.create<tlx::RequireLayoutOp>(newType, v);
+             } else {
+               throw std::runtime_error("Unsupported type");
+             }
+           })
       .def("create_release_layout",
            [](TritonOpBuilder &self, Value &v) -> Value {
              if (auto type = dyn_cast<RankedTensorType>(v.getType())) {
@@ -264,9 +264,8 @@ void init_triton_tlx_ir(py::module &&m) {
                // Obtain the single buffer view
                Value idx = self.getBuilder().create<arith::ConstantIntOp>(
                    bufferViews.getLoc(), i, 32);
-               mlir::Value buf =
-                   self.create<ttg::MemDescIndexOp>(
-                       singleBarrierMemDescType, bufferViews, idx);
+               mlir::Value buf = self.create<ttg::MemDescIndexOp>(
+                   singleBarrierMemDescType, bufferViews, idx);
 
                // Initialize mbarrier at buf view
                self.create<ttng::InitBarrierOp>(buf,
@@ -302,13 +301,17 @@ void init_triton_tlx_ir(py::module &&m) {
            })
       .def("create_tmem_alloc",
            [](TritonOpBuilder &self, std::vector<int64_t> shape,
-              Type &elementType, Attribute &encoding) -> mlir::Value {
+              Type &elementType, Attribute &encoding,
+              std::optional<Value> alias) -> mlir::Value {
              auto context = self.getBuilder().getContext();
              auto memorySpace = ttng::TensorMemorySpaceAttr::get(context);
              auto memDesc =
                  ttg::MemDescType::get(shape, elementType, encoding,
                                        memorySpace, /*mutableMemory=*/true);
-             return self.create<ttng::TMEMAllocOp>(memDesc, nullptr);
+             if (alias)
+               return self.create<tlx::LocalAliasOp>(memDesc, *alias);
+             else
+               return self.create<ttng::TMEMAllocOp>(memDesc, nullptr);
            })
       .def("create_tmem_load",
            [](TritonOpBuilder &self, Value subView, Attribute &layoutEncoding,
@@ -357,8 +360,7 @@ void init_triton_tlx_ir(py::module &&m) {
                }
                // TODO: find the defining op properly
                auto definingOp = value.getDefiningOp();
-               if (auto subviewOp =
-                       dyn_cast<ttg::MemDescIndexOp>(definingOp)) {
+               if (auto subviewOp = dyn_cast<ttg::MemDescIndexOp>(definingOp)) {
                  value = subviewOp.getSrc();
                } else {
                  auto requireLayoutOp =
@@ -446,13 +448,17 @@ void init_triton_tlx_ir(py::module &&m) {
            })
       .def("create_local_alloc",
            [](TritonOpBuilder &self, std::vector<int64_t> shape,
-              Type &elementType, Attribute &encoding) -> mlir::Value {
+              Type &elementType, Attribute &encoding,
+              std::optional<Value> alias) -> mlir::Value {
              auto context = self.getBuilder().getContext();
              auto memorySpace = ttg::SharedMemorySpaceAttr::get(context);
              auto memDesc =
                  ttg::MemDescType::get(shape, elementType, encoding,
                                        memorySpace, /*mutableMemory=*/true);
-             return self.create<ttg::LocalAllocOp>(memDesc);
+             if (alias)
+               return self.create<tlx::LocalAliasOp>(memDesc, *alias);
+             else
+               return self.create<ttg::LocalAllocOp>(memDesc);
            })
       .def("create_async_TMA_load",
            [](TritonOpBuilder &self, Value desc, std::vector<Value> &coord,
@@ -474,6 +480,8 @@ void init_triton_tlx_ir(py::module &&m) {
 void init_triton_tlx_passes(py::module &&m) {
   ADD_PASS_WRAPPER_0("add_tlx_propagate_layout", tlx::createTlxPropagateLayout);
   ADD_PASS_WRAPPER_0("add_tlx_insert_require_layout", tlx::createTLXInsertRequireLayout);
+  ADD_PASS_WRAPPER_0("add_tlx_rewrite_local_alias",
+                     tlx::createTLXRewriteLocalAlias);
   ADD_PASS_OPTION_WRAPPER_4("add_triton_tlx_fixup", tlx::createTritonTLXFixup,
                             std::string, int32_t, int32_t, int32_t);
 }

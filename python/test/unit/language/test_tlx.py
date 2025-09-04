@@ -149,7 +149,7 @@ def _generate_test_params():
     dims_k = [16, 32, 64]
     dtype = torch.float16
     params = []
-    
+
     for M, N, K in itertools.product(dims_mn, dims_mn, dims_k):
         device_props = str(torch.cuda.get_device_properties())
         matmul_size = (M * K + K * N) * dtype.itemsize
@@ -164,7 +164,7 @@ def _generate_test_params():
             params.append((M, N, K))
     return params
 
-# Test tl.dot wit tlx smem ops 
+# Test tl.dot wit tlx smem ops
 # Tests tl.load->tlx_local_store->tlx_local_load->tl.dot
 @pytest.mark.skipif(is_blackwell(), reason="Not tested on Blackwell")
 @pytest.mark.parametrize("M,N,K", _generate_test_params())
@@ -1080,7 +1080,7 @@ def tlx_square_non_ws(
     mask = offsets < n_elements
 
     # mbarrier ops
-    
+
     bars = tlx.alloc_barriers(num_barriers=1, arrive_count=EXPECTED_ARRIVAL_COUNT)  # create
     bar = tlx.local_view(bars, 0)
 
@@ -1177,7 +1177,7 @@ def test_wait_arrive_non_ws(BLOCK_SIZE, device):
     if is_hip():
         assert (ttgir.count("amdgpu.init_barrier") == 1) and (ttgir.count("amdgpu.read_barrier_phase") == 3) and (
           ttgir.count("amdgpu.arrive_barrier") == 3), f"TTGIR {ttgir}"
-    else:    
+    else:
         assert (ttgir.count("ttng.init_barrier") == 1) and (ttgir.count("ttng.wait_barrier") == 3) and (
           ttgir.count("ttng.barrier_expect") == 0) and (ttgir.count("ttng.arrive_barrier") == 3), f"TTGIR {ttgir}"
 
@@ -1485,13 +1485,13 @@ def test_async_dots_blackwell_tmem(device):
                                  d_ptr, stride_dm, stride_dn, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
         a_tiles = tlx.local_alloc((BLOCK_M, BLOCK_K), tl.float16, tl.constexpr(1))
         b_tiles = tlx.local_alloc((BLOCK_K, BLOCK_N), tl.float16, tl.constexpr(1))
-        c_tiles = tlx.local_alloc((BLOCK_N, BLOCK_N), tl.float16, tl.constexpr(1))
+        c_tiles = tlx.local_alloc((BLOCK_N, BLOCK_N), tl.float16, tl.constexpr(1), reuse=a_tiles)
 
         ab_fulls = tlx.alloc_barriers(num_barriers=tl.constexpr(1))
         c_fulls = tlx.alloc_barriers(num_barriers=tl.constexpr(1))
 
         acc_tiles = tlx.local_alloc((BLOCK_M, BLOCK_N), tl.float32, tl.constexpr(1), tlx.storage_kind.tmem)
-        o_tiles = tlx.local_alloc((BLOCK_M, BLOCK_N), tl.float16, tl.constexpr(1), tlx.storage_kind.tmem)
+        o_tiles = tlx.local_alloc((BLOCK_M, BLOCK_N), tl.float16, tl.constexpr(1), tlx.storage_kind.tmem, reuse=acc_tiles)
         d_tiles = tlx.local_alloc((BLOCK_M, BLOCK_N), tl.float32, tl.constexpr(1), tlx.storage_kind.tmem)
 
         acc_fulls = tlx.alloc_barriers(num_barriers=tl.constexpr(1))
@@ -1515,6 +1515,7 @@ def test_async_dots_blackwell_tmem(device):
                 tlx.barrier_arrive(ab_fulls[0])
 
                 # load c
+                tlx.barrier_wait(acc_fulls[0], tl.constexpr(0))
                 tlx.async_load(c_ptrs, c_tiles[0])
                 tlx.async_load_commit_group()
                 tlx.async_load_wait_group(tl.constexpr(0))
@@ -1565,7 +1566,7 @@ def test_async_dots_blackwell_tmem(device):
                                               c.stride(1), d, d.stride(0), d.stride(1), **kern_kwargs, num_warps=1)
 
     ttgir = kernel.asm["ttgir"]
-    assert ttgir.count("ttng.tmem_alloc") == 3
+    assert ttgir.count("ttng.tmem_alloc") == 2
 
     ref_out = ((a @ b) * 0.5) @ c
     torch.testing.assert_close(d, ref_out)

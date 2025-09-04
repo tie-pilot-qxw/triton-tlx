@@ -105,7 +105,7 @@ LogicalResult LayoutBackwardPropagation::visitOperation(
     Operation *op, ArrayRef<LayoutEncodingLattice *> operands,
     ArrayRef<const LayoutEncodingLattice *> results) {
   LDBG("Visiting operation " << *op << "\n");
-  if (isa<tlx::ReleaseLayoutOp>(op))
+  if (isa<tlx::ReleaseLayoutOp, tlx::LocalAliasOp>(op))
     return success();
 
   if (isa<RegionBranchOpInterface, ttg::WarpSpecializePartitionsOp>(op))

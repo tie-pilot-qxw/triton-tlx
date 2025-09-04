@@ -53,4 +53,15 @@ def TLXInsertRequireLayout : Pass<"tlx-insert-require-layout", "mlir::ModuleOp">
   let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect"];
 
 }
+
+def TLXRewriteLocalAlias : Pass<"tlx-rewrite-local-alias", "mlir::ModuleOp"> {
+  let summary = "Replace tlx::LocalAliasOp with the aliased local mem_desc";
+
+  let description = [{
+    This pass replaces a tlx::LocalAliasOp op with the original aliased mem_desc.
+  }];
+
+  let dependentDialects = ["mlir::triton::gpu::TritonGPUDialect"];
+
+}
 #endif // TRITON_TLX_PASSES
