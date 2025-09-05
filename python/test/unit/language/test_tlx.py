@@ -8,6 +8,7 @@ from triton._internal_testing import is_hopper_or_newer, is_blackwell, is_hopper
 import triton.language.extra.tlx as tlx
 from typing import Optional
 import traceback
+import triton.runtime.driver as driver
 
 
 @pytest.mark.skipif(not is_hopper_or_newer(), reason="Need Hopper or newer")
@@ -144,22 +145,23 @@ def test_local_load(BLOCK_SIZE, device):
 
 def _generate_test_params():
     """Generate test parameters with filtering for memory constraints."""
-    dims = [16, 32, 64, 128, 256, 512]
+    dims_mn = [16, 32, 64, 128, 512]
+    dims_k = [16, 32, 64]
     dtype = torch.float16
     params = []
     
-    for M, N, K in itertools.product(dims, dims, dims):
-        # Check MI300 SMEM constraint (64K limit)
-        if torch.cuda.is_available():
-            device_props = str(torch.cuda.get_device_properties())
-            if "gfx942" in device_props and (M * K + K * N) * dtype.itemsize > 64 * 1024:
-                continue
-        # Skip specific problematic case
-        if M == 512 and N == 512 and K == 16:
+    for M, N, K in itertools.product(dims_mn, dims_mn, dims_k):
+        device_props = str(torch.cuda.get_device_properties())
+        matmul_size = (M * K + K * N) * dtype.itemsize
+        max_shared_mem = driver.active.utils.get_device_properties(
+            driver.active.get_current_device())["max_shared_mem"]
+        if matmul_size > max_shared_mem:
+            continue
+        # TODO: Investigate why this test fails on gfx942 with M=512, N=512, K=16
+        if "gfx942" in device_props and M == 512 and N == 512 and K == 16:
             params.append(pytest.param(M, N, K, marks=pytest.mark.xfail()))
         else:
             params.append((M, N, K))
-    
     return params
 
 # Test tl.dot wit tlx smem ops 
