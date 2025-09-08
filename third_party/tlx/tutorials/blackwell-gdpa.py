@@ -1,6 +1,7 @@
 # TLX GDPA kernel optimized for Blackwell Warp Specialization
 
 import math
+import os
 from functools import lru_cache
 from typing import Any, Optional
 
@@ -9,6 +10,8 @@ import triton
 import triton.language as tl
 import triton.language.extra.tlx as tlx
 from triton.tools.tensor_descriptor import TensorDescriptor
+import triton.profiler.language as pl
+import triton.profiler as proton
 
 
 @lru_cache
@@ -33,33 +36,62 @@ def _host_descriptor_pre_hook(nargs):
 
 
 def get_cuda_autotune_config():
-    return [
-        triton.Config(
-            {
-                "BLOCK_M": BM,
-                "BLOCK_N": BN,
-                "NUM_BUFFERS_Q": bq,
-                "NUM_BUFFERS_KV": bkv,
-                "NUM_BUFFERS_QK": bqk,
-                "NUM_BUFFERS_O": bo,
-                "SUBTILING": SUBTILE,
-                "PINGPONG": pp,
-                "ACT_REGS": ar,
-            },
-            num_warps=4,
-            num_stages=1,
-            pre_hook=_host_descriptor_pre_hook,
-        )
-        for BM in [256]  # 128 or 256
-        for BN in [128]
-        for bq in [1]
-        for bkv in [3]
-        for bqk in [1]  # in tmem
-        for bo in [1]  # in tmem
-        for SUBTILE in [True]  # doesn't support False
-        for pp in [True, False]
-        for ar in [192, 232]
-    ]
+    if os.getenv("ENABLE_PROTON") == "1":
+        return [
+            triton.Config(
+                {
+                    "BLOCK_M": BM,
+                    "BLOCK_N": BN,
+                    "NUM_BUFFERS_Q": bq,
+                    "NUM_BUFFERS_KV": bkv,
+                    "NUM_BUFFERS_QK": bqk,
+                    "NUM_BUFFERS_O": bo,
+                    "SUBTILING": SUBTILE,
+                    "PINGPONG": pp,
+                    "ACT_REGS": ar,
+                },
+                num_warps=4,
+                num_stages=1,
+                pre_hook=_host_descriptor_pre_hook,
+            )
+            for BM in [256]  # 128 or 256
+            for BN in [128]
+            for bq in [1]
+            for bkv in [3]
+            for bqk in [1]  # in tmem
+            for bo in [1]  # in tmem
+            for SUBTILE in [True]  # doesn't support False
+            for pp in [False]
+            for ar in [232]
+        ]
+    else:
+        return [
+            triton.Config(
+                {
+                    "BLOCK_M": BM,
+                    "BLOCK_N": BN,
+                    "NUM_BUFFERS_Q": bq,
+                    "NUM_BUFFERS_KV": bkv,
+                    "NUM_BUFFERS_QK": bqk,
+                    "NUM_BUFFERS_O": bo,
+                    "SUBTILING": SUBTILE,
+                    "PINGPONG": pp,
+                    "ACT_REGS": ar,
+                },
+                num_warps=4,
+                num_stages=1,
+                pre_hook=_host_descriptor_pre_hook,
+            )
+            for BM in [256]  # 128 or 256
+            for BN in [128]
+            for bq in [1]
+            for bkv in [3]
+            for bqk in [1]  # in tmem
+            for bo in [1]  # in tmem
+            for SUBTILE in [True]  # doesn't support False
+            for pp in [True, False]
+            for ar in [192, 232]
+        ]
 
 
 ## Iterative tuning with intra-kernel profiler
@@ -299,7 +331,12 @@ def gdpa_kernel_tma_ws_blackwell(
     SUBTILING: tl.constexpr,
     PINGPONG: tl.constexpr,
     ACT_REGS: tl.constexpr,
+    ENABLE_PROTON: tl.constexpr,
 ):
+
+    if ENABLE_PROTON:
+        pl.enter_scope("kernel")
+
     n_tile_num = tl.cdiv(N_CTX, BLOCK_M)
     prog_id = tl.program_id(0)
     num_progs = tl.num_programs(0)
@@ -392,7 +429,7 @@ def gdpa_kernel_tma_ws_blackwell(
         with tlx.async_task("default", registers=ACT_REGS):
             accum_cnt = 0
             accum_cnt_outer = 0
-            for _ in range(0, tiles_per_sm):
+            for idx in range(0, tiles_per_sm):
                 begin_q, end_q, begin_k, qlen, klen = _compute_qlen(
                     tile_idx,
                     n_tile_num,
@@ -408,10 +445,13 @@ def gdpa_kernel_tma_ws_blackwell(
                 off_hz = tile_idx // n_tile_num
                 off_h = off_hz % H
                 out_offset = off_h.to(tl.int64) * stride_oh
+
                 if start_m * BLOCK_M < qlen:
                     lo, hi = 0, klen
                     # tl.device_print("default", hi)
                     for start_n in range(lo, hi, BLOCK_N):
+                        if ENABLE_PROTON and idx < 1:
+                            pl.enter_scope("elementwise_1")
                         start_n = tl.multiple_of(start_n, BLOCK_N)
                         # tl.device_print("default start_n", start_n)
                         bufIdx = accum_cnt % NUM_BUFFERS_QK
@@ -431,6 +471,7 @@ def gdpa_kernel_tma_ws_blackwell(
                         qk1 = tlx.local_load(qk_view_2nd)
                         c1 = 0.0356774081
                         c0 = 0.7978845608
+                        
                         square = _mul_f32x2(qk0, qk0)
                         inner = _fma_f32x2(c1, square, c0)
                         inner0 = _mul_f32x2(inner, qk0)
@@ -468,6 +509,8 @@ def gdpa_kernel_tma_ws_blackwell(
                         # there is no need to wait for o0 at each iteration
                         # tlx.barrier_wait(consumer_o0_view, phase)
                         accum_cnt += 1
+                        if ENABLE_PROTON and idx < 1:
+                            pl.exit_scope("elementwise_1")
 
                     # epilogue here, load from tmem
                     # FIXME: wait till o0 is done for the inner loop
@@ -508,7 +551,7 @@ def gdpa_kernel_tma_ws_blackwell(
             accum_cnt_outer = 0
             if PINGPONG:
                 tlx.named_barrier_arrive(9, 128)
-            for _ in range(0, tiles_per_sm):
+            for idx in range(0, tiles_per_sm):
                 pid = tile_idx % n_tile_num
                 start_m = pid
                 off_hz = tile_idx // n_tile_num
@@ -527,6 +570,8 @@ def gdpa_kernel_tma_ws_blackwell(
                 if start_m * BLOCK_M < qlen:
                     lo, hi = 0, klen
                     for start_n in range(lo, hi, BLOCK_N):
+                        if ENABLE_PROTON and idx < 1:
+                            pl.enter_scope("elementwise_2")
                         start_n = tl.multiple_of(start_n, BLOCK_N)
                         ## communication channel for qk1, p1
                         bufIdx = accum_cnt % NUM_BUFFERS_QK
@@ -579,6 +624,8 @@ def gdpa_kernel_tma_ws_blackwell(
                         # there is no need to wait for o1 at each iteration
                         # tlx.barrier_wait(consumer_o1_view, phase)
                         accum_cnt += 1
+                        if ENABLE_PROTON and idx < 1:
+                            pl.exit_scope("elementwise_2")
                     # epilogue here, load from tmem
                     # FIXME: wait till o1 is done for the inner loop
                     bufIdx_o_outer, phase_o_outer = _get_bufidx_phase(
@@ -618,7 +665,7 @@ def gdpa_kernel_tma_ws_blackwell(
             accum_cnt_o = 0
             accum_cnt_qk = 0
             accum_cnt_outer = 0
-            for _ in range(0, tiles_per_sm):
+            for idx in range(0, tiles_per_sm):
                 pid = tile_idx % n_tile_num
                 start_m = pid
                 begin_q, end_q, begin_k, qlen, klen = _compute_qlen(
@@ -631,6 +678,7 @@ def gdpa_kernel_tma_ws_blackwell(
                     H,
                     N_CTX,
                 )
+
                 if start_m * BLOCK_M < qlen:
                     # prologue
                     bufIdx_q, phase_q = _get_bufidx_phase(accum_cnt_q, NUM_BUFFERS_Q)
@@ -759,6 +807,8 @@ def gdpa_kernel_tma_ws_blackwell(
                     # tl.device_print("gemm for ", hi)
                     # tl.device_print("gemm mma_iters ", mma_iters)
                     for it in range(BLOCK_N, hi, BLOCK_N):
+                        if ENABLE_PROTON and idx < 1:
+                            pl.enter_scope("dot_1")
                         # for it in range(mma_iters - 1):
                         # tl.device_print("gemm iter ", it)
                         bufIdx_k, phase_k = _get_bufidx_phase(
@@ -908,6 +958,8 @@ def gdpa_kernel_tma_ws_blackwell(
                         accum_cnt_qk1 += 1
                         accum_cnt_o += 1
                         accum_cnt_o1 += 1
+                        if ENABLE_PROTON and idx < 1:
+                            pl.exit_scope("dot_1")
 
                     # epilogue
                     # commit to release q0, q1
@@ -973,7 +1025,7 @@ def gdpa_kernel_tma_ws_blackwell(
         with tlx.async_task(num_warps=1, registers=24):  # load
             accum_count_q = 0
             accum_cnt_kv = 0
-            for _ in range(0, tiles_per_sm):
+            for idx in range(0, tiles_per_sm):
                 pid = tile_idx % n_tile_num
                 off_hz = tile_idx // n_tile_num
                 off_z = off_hz // H
@@ -1106,6 +1158,8 @@ def gdpa_kernel_tma_ws_blackwell(
 
                     lo, hi = 0, klen
                     for start_n in range(BLOCK_N, hi, BLOCK_N):
+                        if ENABLE_PROTON and idx < 1:
+                            pl.enter_scope("dot_2")
                         start_n = tl.multiple_of(start_n, BLOCK_N)
                         k_bufIdx, k_phase = _get_bufidx_phase(
                             accum_cnt_kv, NUM_BUFFERS_KV
@@ -1159,9 +1213,14 @@ def gdpa_kernel_tma_ws_blackwell(
                         )
                         # tl.device_print("load consumer_v_buf", v_bufIdx)
                         accum_cnt_kv += 2
+                        if ENABLE_PROTON and idx < 1:
+                            pl.exit_scope("dot_2")
                     # outside of inner for
                     accum_count_q += 1
                 tile_idx += num_progs
+
+    if ENABLE_PROTON:
+        pl.exit_scope("kernel")
 
 
 def next_power_of_2(x):
@@ -1324,6 +1383,8 @@ def gdpa_forward_tlx(
     # print(query_offset)
     # print(key_offset)
 
+    enable_proton = True if os.getenv("ENABLE_PROTON") == "1" else False
+
     gdpa_kernel_tma_ws_blackwell[grid_tma_persistent](
         q if USE_ON_DEVICE_TMA else desc_q,
         query_offset,
@@ -1366,6 +1427,7 @@ def gdpa_forward_tlx(
         IS_DENSE_KV=is_dense_kv,
         activation_enum_int=activation_enum_int,
         USE_ON_DEVICE_TMA=USE_ON_DEVICE_TMA,
+        ENABLE_PROTON=enable_proton,
         **extra_kern_args,
     )
     return o
@@ -1566,24 +1628,7 @@ def generate_jagged_data(
     }
 
 
-def bench_tlx_gdpa():
-    config = {
-        "B": 1024,
-        "max_M": 1000,
-        "D": 384,
-        "H": 3,
-        "dense_q_len": 192,
-        "sparsity": 0.5,
-        "dense_q": False,
-        "dff": None,
-        "bias": False,
-        "dtype": torch.bfloat16,
-        "fused_kv": False,
-        "window_size": None,
-        "broadcast_q": False,
-        "activation": "fast_gelu",
-    }
-
+def get_tlx_gdpa_fn(config):
     B = config["B"]
     max_M = config["max_M"]
     D = config["D"]
@@ -1639,17 +1684,69 @@ def bench_tlx_gdpa():
         broadcast_q=jagged_data["broadcast_q"],
         window_size=jagged_data["window_size"],
     )
+    return fn
+
+
+def bench_tlx_gdpa(config):
+    B = config["B"]
+    max_M = config["max_M"]
+    D = config["D"]
+    H = config["H"]
+    sparsity = config["sparsity"]
+
+    fn = get_tlx_gdpa_fn(config)
     ms = triton.testing.do_bench_cudagraph(fn)
     print(f"{B=} {max_M=} {D=} {H=} {sparsity=}")
     print(f"GDPA TLX WS: {ms} ms")
+
+
+def profile_tlx_gdpa(config):
+    fn = get_tlx_gdpa_fn(config)
+    warp_sampling = config["warp_sampling"]
+    mode = None
+    if warp_sampling:
+        # warp sampling: only capture warp 0, 4, 10, 11
+        mode = proton.mode.Default(metric_type="cycle",
+                                   optimizations="clock32,time_shift",
+                                   sampling_strategy="selective",
+                                   sampling_options="0, 4, 10, 11")
+    else:
+        # all warps
+        mode = proton.mode.Default(metric_type="cycle", optimizations="clock32,time_shift")
+    proton.start("gdpa", data="trace", backend="instrumentation", mode=mode)
+    print(fn())
+    proton.finalize()
 
 
 def is_cuda():
     return triton.runtime.driver.active.get_current_target().backend == "cuda"
 
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     if is_cuda() and torch.cuda.get_device_capability()[0] == 10:
-        bench_tlx_gdpa()
+        config = {
+            "B": 1024,
+            "max_M": 1000,
+            "D": 384,
+            "H": 3,
+            "dense_q_len": 192,
+            "sparsity": 0.5,
+            "dense_q": False,
+            "dff": None,
+            "bias": False,
+            "dtype": torch.bfloat16,
+            "fused_kv": False,
+            "window_size": None,
+            "broadcast_q": False,
+            "activation": "fast_gelu",
+            "warp_sampling": False,
+        }
+
+        if os.getenv("ENABLE_PROTON") == "1":
+            print("proton intra kernel profiling")
+            profile_tlx_gdpa(config)
+        else:
+            print("benchmarking tlx gdpa")
+            bench_tlx_gdpa(config)
     else:
         print("Skipping benchmarks")
