@@ -167,8 +167,6 @@ void init_triton_tlx_ir(py::module &&m) {
                     "Integer type not supported.");
 
              Block *parentBlock = self.getBuilder().getInsertionBlock();
-             mlir::Operation *parentOp = parentBlock->getParentOp();
-             auto moduleOp = parentOp->getParentOfType<ModuleOp>();
              int numWarps =
                  ttg::maybeLookupNumWarps(parentBlock).value_or(moduleNumWarps);
              assert((numWarps == 4 || numWarps == 8) &&

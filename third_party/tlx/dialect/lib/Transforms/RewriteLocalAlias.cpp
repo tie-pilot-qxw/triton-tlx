@@ -148,29 +148,27 @@ LogicalResult rewriteLocalAlias(ModuleOp m) {
     Operation *baseAllocOp = kv.first;
     if (allocToNewAlloc.count(baseAllocOp)) {
       auto newAllocOp = allocToNewAlloc[baseAllocOp];
-      if (newAllocOp) {
-        // Create a memdesc reinterpret op to convert the new alloc to the base
-        // alloc
-        LLVM_DEBUG({
-          llvm::dbgs() << "\n";
-          DBGS() << "Rewrite base alloc: ";
-          baseAllocOp->dump();
-          DBGS() << "  to: ";
-          newAllocOp->dump();
-        });
+      // Create a memdesc reinterpret op to convert the new alloc to the base
+      // alloc
+      LLVM_DEBUG({
+        llvm::dbgs() << "\n";
+        DBGS() << "Rewrite base alloc: ";
+        baseAllocOp->dump();
+        DBGS() << "  to: ";
+        newAllocOp->dump();
+      });
 
-        builder.setInsertionPoint(baseAllocOp);
-        auto newAllocType =
-            dyn_cast<ttg::MemDescType>(newAllocOp->getResult(0).getType());
-        auto baseAllocType =
-            dyn_cast<ttg::MemDescType>(baseAllocOp->getResult(0).getType());
-        auto newAllocToBaseAllocOp = builder.create<ttg::MemDescReinterpretOp>(
-            baseAllocOp->getLoc(), baseAllocType, newAllocOp->getResult(0));
-        baseAllocOp->getResult(0).replaceAllUsesWith(
-            newAllocToBaseAllocOp.getResult());
-        baseAllocOp->erase();
-        baseAllocOp = newAllocOp;
-      }
+      builder.setInsertionPoint(baseAllocOp);
+      auto newAllocType =
+          dyn_cast<ttg::MemDescType>(newAllocOp->getResult(0).getType());
+      auto baseAllocType =
+          dyn_cast<ttg::MemDescType>(baseAllocOp->getResult(0).getType());
+      auto newAllocToBaseAllocOp = builder.create<ttg::MemDescReinterpretOp>(
+          baseAllocOp->getLoc(), baseAllocType, newAllocOp->getResult(0));
+      baseAllocOp->getResult(0).replaceAllUsesWith(
+          newAllocToBaseAllocOp.getResult());
+      baseAllocOp->erase();
+      baseAllocOp = newAllocOp;
     }
 
     // Rewrite all alias ops in the class to use the new/base alloc op.
