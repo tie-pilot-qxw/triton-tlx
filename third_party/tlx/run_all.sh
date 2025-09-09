@@ -19,6 +19,27 @@ if [ "$(ask)" == "yes" ]; then
     pip install -e . --no-build-isolation
 fi
 
+# Run LIT
+ask() {
+    retval=""
+    while true; do
+        read -p "Run all LITs? {y|n}" yn
+        case $yn in
+            [Yy]* ) retval="yes"; break;;
+            [Nn]* ) retval="no"; break;;
+            * ) echo "Please answer yes or no.";;
+        esac
+    done
+    echo "$retval"
+}
+if [ "$(ask)" == "yes" ]; then
+    echo "Running LITs"
+    pushd build/cmake.linux-x86_64-cpython-3.13/
+    lit test -a
+    popd
+fi
+
+
 # Run unit tests
 ask() {
     retval=""
