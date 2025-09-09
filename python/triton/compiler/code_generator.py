@@ -1052,11 +1052,16 @@ class CodeGenerator(ast.NodeVisitor):
         assert _is_triton_value(loop_val), f'cannot reassign constexpr {name} in the loop'
         assert _is_triton_value(live_val), f'cannot reassign constexpr {name} in the loop'
         assert type(loop_val) is type(live_val), f'Loop carried variable {name} changed type'
-        if hasattr(loop_val, 'type'):
+        # Facebook begin:
+        # if tl.constexpr: skip to avoid false alarm such as \
+        # Loop-carried variable "i" has initial type constexpr_type[0] but is re-assigned to constexpr_type[1] in loop
+        # if tl.tensor or buffered_tensor(tl.base_value): assert type persists
+        if not _is_constexpr(loop_val) and hasattr(loop_val, 'type'):
             assert loop_val.type == live_val.type, \
-                f'Loop-carried variable "{name}" has initial type {live_val.type} '\
-                f'but is re-assigned to {loop_val.type} in loop! '\
-                f'Please make sure that the type stays consistent.'
+            f'Loop-carried variable {name} has initial type {live_val.type} '\
+            f'but is re-assigned to {loop_val.type} in loop! '\
+            f'Please make sure that the type stays consistent.'
+        # Facebook end:
 
     def visit_withitem(self, node):
         return self.visit(node.context_expr)
@@ -1064,7 +1069,7 @@ class CodeGenerator(ast.NodeVisitor):
     def visit_With(self, node):
         assert len(node.items) == 1
         context = node.items[0].context_expr
-        # Facebook begins 
+        # Facebook begins
         # In upstream repo, `with` statements are lowered by constructing context managers
         # and it will require non-trivial changes in TLX dispatcher for async_task
         # which will be done later
