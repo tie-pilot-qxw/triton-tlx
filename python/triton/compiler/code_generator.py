@@ -1056,7 +1056,7 @@ class CodeGenerator(ast.NodeVisitor):
         # if tl.constexpr: skip to avoid false alarm such as \
         # Loop-carried variable "i" has initial type constexpr_type[0] but is re-assigned to constexpr_type[1] in loop
         # if tl.tensor or buffered_tensor(tl.base_value): assert type persists
-        if not _is_constexpr(loop_val):
+        if not _is_constexpr(loop_val) and hasattr(loop_val, 'type'):
             assert loop_val.type == live_val.type, \
             f'Loop-carried variable {name} has initial type {live_val.type} '\
             f'but is re-assigned to {loop_val.type} in loop! '\
