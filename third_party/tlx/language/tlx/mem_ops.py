@@ -30,6 +30,7 @@ def local_alloc(
     dtype: tl.dtype,
     num: tl.constexpr,
     storage: tlx.storage_kind = tlx.storage_kind.smem,
+    reuse: Optional[tlx.buffered_tensor] = None,
     layout: Optional[tlx.shared_layout_encoding] = None,
     _semantic=None,
 ) -> tlx.buffered_tensor:
@@ -93,10 +94,20 @@ To bypass, rewrite it to `local_alloc(..., num=tl.constexpr(2))` or `local_alloc
     else:
         raise NotImplementedError("User-specified layout encoding not yet implemented.")
 
+    alias_handle = None
+    if reuse:
+        # reuse tensor has to be a buffered tensor
+        if not isinstance(reuse, tlx.buffered_tensor):
+            raise ValueError("reuse tensor has to be a buffered tensor")
+        # verify that the reuse tensor has the same storage
+        if reuse.type.storage != storage:
+            raise ValueError("reuse tensor has different storage")
+        alias_handle = reuse.handle
+
     if storage == tlx.storage_kind.smem:
-        tensor_handle = _semantic.builder.create_local_alloc(full_shape, elem_type, layout_handle)
+        tensor_handle = _semantic.builder.create_local_alloc(full_shape, elem_type, layout_handle, alias_handle)
     else:
-        tensor_handle = _semantic.builder.create_tmem_alloc(full_shape, elem_type, layout_handle)
+        tensor_handle = _semantic.builder.create_tmem_alloc(full_shape, elem_type, layout_handle, alias_handle)
 
     return tlx.buffered_tensor(tensor_handle, dtype, unwrapped_shape, unwrapped_num, storage, layout, _semantic)
 
