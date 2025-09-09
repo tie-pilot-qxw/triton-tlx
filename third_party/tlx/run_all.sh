@@ -73,7 +73,7 @@ case $user_choice in
         echo "Measuring performance of TLX tutorial kernels"
         for k in third_party/tlx/tutorials/*.py; do
             echo "Running $k"
-            python $k
+            third_party/tlx/denoise.sh python $k
         done
         ;;
     n)
