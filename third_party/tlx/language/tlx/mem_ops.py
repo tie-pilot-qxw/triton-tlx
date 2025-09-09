@@ -383,3 +383,25 @@ def async_descriptor_store(
     source_handle = require_nv_mma_shared_layout(source, _semantic.builder)
     offsets = _semantic._convert_to_ir_values(offsets, require_i64=False)
     _semantic.builder.create_async_TMA_store(desc.handle, offsets, source_handle)
+
+
+@tl.builtin
+def async_descriptor_store_wait(
+    pendings: tl.constexpr,
+    _semantic=None,
+) -> None:
+    """
+    Wait for completion of prior asynchronous TMA store operations.
+    """
+    pendings = tl._unwrap_if_constexpr(pendings)
+    _semantic.builder.create_async_TMA_store_wait(pendings)
+
+
+@tl.builtin
+def fence_async_shared(
+    _semantic=None,
+) -> None:
+    """
+    Order memory operations that go through the shared memory.
+    """
+    _semantic.builder.create_fence_async_shared(False)
