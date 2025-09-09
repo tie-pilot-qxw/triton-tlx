@@ -12,6 +12,7 @@ import triton.language.extra.tlx as tlx
 from triton.tools.tensor_descriptor import TensorDescriptor
 import triton.profiler.language as pl
 import triton.profiler as proton
+from triton._internal_testing import is_blackwell
 
 
 @lru_cache
@@ -471,7 +472,7 @@ def gdpa_kernel_tma_ws_blackwell(
                         qk1 = tlx.local_load(qk_view_2nd)
                         c1 = 0.0356774081
                         c0 = 0.7978845608
-                        
+
                         square = _mul_f32x2(qk0, qk0)
                         inner = _fma_f32x2(c1, square, c0)
                         inner0 = _mul_f32x2(inner, qk0)
@@ -1713,7 +1714,7 @@ def profile_tlx_gdpa(config):
     else:
         # all warps
         mode = proton.mode.Default(metric_type="cycle", optimizations="clock32,time_shift")
-    proton.start("gdpa", data="trace", backend="instrumentation", mode=mode)
+    proton.start("~/gdpa", data="trace", backend="instrumentation", mode=mode)
     print(fn())
     proton.finalize()
 
@@ -1722,8 +1723,8 @@ def is_cuda():
     return triton.runtime.driver.active.get_current_target().backend == "cuda"
 
 
-if __name__ == "__main__": 
-    if is_cuda() and torch.cuda.get_device_capability()[0] == 10:
+if __name__ == "__main__":
+    if is_blackwell():
         config = {
             "B": 1024,
             "max_M": 1000,
