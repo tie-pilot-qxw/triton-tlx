@@ -41,21 +41,21 @@ void init_triton_tlx_ir(py::module &&m) {
             return self.create<ttg::MemDescIndexOp>(memDescType, localAlloc, bufferIdx);
           })
       .def("create_require_layout",
-            [](TritonOpBuilder &self, Value &v, Attribute &encoding) -> Value {
-              Type newType;
-              if (auto type = dyn_cast<ttg::MemDescType>(v.getType())) {
-                newType = ttg::MemDescType::get(
-                    type.getShape(), type.getElementType(), encoding,
-                    type.getMemorySpace(), type.getMutableMemory());
-                return self.create<tlx::RequireLayoutOp>(newType, v);
-              } else if (auto type = dyn_cast<RankedTensorType>(v.getType())) {
-                newType = RankedTensorType::get(
-                    type.getShape(), type.getElementType(), encoding);
-                return self.create<tlx::RequireLayoutOp>(newType, v);
-              } else {
-                throw std::runtime_error("Unsupported type");
-              }
-            })
+           [](TritonOpBuilder &self, Value &v, Attribute &encoding) -> Value {
+             Type newType;
+             if (auto type = dyn_cast<ttg::MemDescType>(v.getType())) {
+               newType = ttg::MemDescType::get(
+                   type.getShape(), type.getElementType(), encoding,
+                   type.getMemorySpace(), type.getMutableMemory());
+               return self.create<tlx::RequireLayoutOp>(newType, v);
+             } else if (auto type = dyn_cast<RankedTensorType>(v.getType())) {
+               newType = RankedTensorType::get(type.getShape(),
+                                               type.getElementType(), encoding);
+               return self.create<tlx::RequireLayoutOp>(newType, v);
+             } else {
+               throw std::runtime_error("Unsupported type");
+             }
+           })
       .def("create_release_layout",
            [](TritonOpBuilder &self, Value &v) -> Value {
              if (auto type = dyn_cast<RankedTensorType>(v.getType())) {
@@ -264,9 +264,8 @@ void init_triton_tlx_ir(py::module &&m) {
                // Obtain the single buffer view
                Value idx = self.getBuilder().create<arith::ConstantIntOp>(
                    bufferViews.getLoc(), i, 32);
-               mlir::Value buf =
-                   self.create<ttg::MemDescIndexOp>(
-                       singleBarrierMemDescType, bufferViews, idx);
+               mlir::Value buf = self.create<ttg::MemDescIndexOp>(
+                   singleBarrierMemDescType, bufferViews, idx);
 
                // Initialize mbarrier at buf view
                self.create<ttng::InitBarrierOp>(buf,
@@ -357,8 +356,7 @@ void init_triton_tlx_ir(py::module &&m) {
                }
                // TODO: find the defining op properly
                auto definingOp = value.getDefiningOp();
-               if (auto subviewOp =
-                       dyn_cast<ttg::MemDescIndexOp>(definingOp)) {
+               if (auto subviewOp = dyn_cast<ttg::MemDescIndexOp>(definingOp)) {
                  value = subviewOp.getSrc();
                } else {
                  auto requireLayoutOp =
@@ -379,7 +377,8 @@ void init_triton_tlx_ir(py::module &&m) {
                      useD.has_value() ? useD.value() : predTrue /*useD*/,
                      pred.has_value() ? pred.value() : predTrue /*pred */,
                      false /* two_ctas*/, ValueRange(mBarriers),
-                     ValueRange(barrierPreds), !mBarriers.empty()/* is_async */)
+                     ValueRange(barrierPreds),
+                     !mBarriers.empty() /* is_async */)
                  .getToken();
            })
       .def("create_tcgen05_commit",
@@ -468,6 +467,14 @@ void init_triton_tlx_ir(py::module &&m) {
               Value source) -> void {
              self.create<ttng::AsyncTMACopyLocalToGlobalOp>(desc, coord,
                                                             source);
+           })
+      .def("create_async_TMA_store_wait",
+           [](TritonOpBuilder &self, int pendings) {
+             self.create<ttng::TMAStoreWaitOp>(pendings);
+           })
+      .def("create_fence_async_shared",
+           [](TritonOpBuilder &self, bool bCluster) -> OpState {
+             return self.create<ttng::FenceAsyncSharedOp>(bCluster);
            });
 }
 

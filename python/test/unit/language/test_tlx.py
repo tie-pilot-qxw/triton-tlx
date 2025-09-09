@@ -149,7 +149,7 @@ def _generate_test_params():
     dims_k = [16, 32, 64]
     dtype = torch.float16
     params = []
-    
+
     for M, N, K in itertools.product(dims_mn, dims_mn, dims_k):
         device_props = str(torch.cuda.get_device_properties())
         matmul_size = (M * K + K * N) * dtype.itemsize
@@ -164,7 +164,7 @@ def _generate_test_params():
             params.append((M, N, K))
     return params
 
-# Test tl.dot wit tlx smem ops 
+# Test tl.dot wit tlx smem ops
 # Tests tl.load->tlx_local_store->tlx_local_load->tl.dot
 @pytest.mark.skipif(is_blackwell(), reason="Not tested on Blackwell")
 @pytest.mark.parametrize("M,N,K", _generate_test_params())
@@ -1080,7 +1080,7 @@ def tlx_square_non_ws(
     mask = offsets < n_elements
 
     # mbarrier ops
-    
+
     bars = tlx.alloc_barriers(num_barriers=1, arrive_count=EXPECTED_ARRIVAL_COUNT)  # create
     bar = tlx.local_view(bars, 0)
 
@@ -1177,7 +1177,7 @@ def test_wait_arrive_non_ws(BLOCK_SIZE, device):
     if is_hip():
         assert (ttgir.count("amdgpu.init_barrier") == 1) and (ttgir.count("amdgpu.read_barrier_phase") == 3) and (
           ttgir.count("amdgpu.arrive_barrier") == 3), f"TTGIR {ttgir}"
-    else:    
+    else:
         assert (ttgir.count("ttng.init_barrier") == 1) and (ttgir.count("ttng.wait_barrier") == 3) and (
           ttgir.count("ttng.barrier_expect") == 0) and (ttgir.count("ttng.arrive_barrier") == 3), f"TTGIR {ttgir}"
 
@@ -1300,6 +1300,8 @@ def test_descriptor_load(device):
         tlx.async_descriptor_load(desc_in, buffer, [off_m, off_n], bar)
         tlx.barrier_wait(bar=bar, phase=0)
         tlx.async_descriptor_store(desc_out, buffer, [off_m, off_n])
+        tlx.async_descriptor_store_wait(0)
+        tlx.fence_async_shared()
 
     triton.set_allocator(alloc_fn)
     M, N = 128, 128
@@ -1311,6 +1313,8 @@ def test_descriptor_load(device):
     kernel = descriptor_load_kernel[grid](x, y, M, N, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N)
     assert kernel.asm["ttgir"].count("ttng.async_tma_copy_global_to_local") == 1
     assert kernel.asm["ttgir"].count("ttng.async_tma_copy_local_to_global") == 1
+    assert kernel.asm["ttgir"].count("ttng.async_tma_store_wait") == 1
+    assert kernel.asm["ttgir"].count("ttng.fence_async_shared") == 1
     torch.testing.assert_close(x, y)
 
 
