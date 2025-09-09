@@ -1579,8 +1579,7 @@ class TritonSemantic(Generic[TensorTy]):
         # max_num_imprecise_acc only applies to fp8 -> fp32 dot on sm_90
         if max_num_imprecise_acc is None:
             if lhs.dtype.is_fp8() and rhs.dtype.is_fp8():
-                # All combinations of supported fp8 x fp8 are permitted
-                pass
+                max_num_imprecise_acc = self.builder.options.max_num_imprecise_acc_default
             else:
                 max_num_imprecise_acc = 0
         else:
