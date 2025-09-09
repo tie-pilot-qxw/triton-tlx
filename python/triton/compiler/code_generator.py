@@ -1052,10 +1052,16 @@ class CodeGenerator(ast.NodeVisitor):
         assert _is_triton_value(loop_val), f'cannot reassign constexpr {name} in the loop'
         assert _is_triton_value(live_val), f'cannot reassign constexpr {name} in the loop'
         assert type(loop_val) is type(live_val), f'Loop carried variable {name} changed type'
-        assert not _is_triton_tensor(loop_val) or loop_val.type == live_val.type, \
+        # Facebook begin:
+        # if tl.constexpr: skip to avoid false alarm such as \
+        # Loop-carried variable "i" has initial type constexpr_type[0] but is re-assigned to constexpr_type[1] in loop
+        # if tl.tensor or buffered_tensor(tl.base_value): assert type persists
+        if not _is_constexpr(loop_val):
+            assert loop_val.type == live_val.type, \
             f'Loop-carried variable {name} has initial type {live_val.type} '\
             f'but is re-assigned to {loop_val.type} in loop! '\
             f'Please make sure that the type stays consistent.'
+        # Facebook end:
 
     def visit_withitem(self, node):
         return self.visit(node.context_expr)
