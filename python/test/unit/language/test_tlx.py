@@ -1300,6 +1300,8 @@ def test_descriptor_load(device):
         tlx.async_descriptor_load(desc_in, buffer, [off_m, off_n], bar)
         tlx.barrier_wait(bar=bar, phase=0)
         tlx.async_descriptor_store(desc_out, buffer, [off_m, off_n])
+        tlx.async_descriptor_store_wait(0)
+        tlx.fence_async_shared()
 
     triton.set_allocator(alloc_fn)
     M, N = 128, 128
@@ -1311,6 +1313,8 @@ def test_descriptor_load(device):
     kernel = descriptor_load_kernel[grid](x, y, M, N, BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N)
     assert kernel.asm["ttgir"].count("ttng.async_tma_copy_global_to_local") == 1
     assert kernel.asm["ttgir"].count("ttng.async_tma_copy_local_to_global") == 1
+    assert kernel.asm["ttgir"].count("ttng.async_tma_store_wait") == 1
+    assert kernel.asm["ttgir"].count("ttng.fence_async_shared") == 1
     torch.testing.assert_close(x, y)
 
 
