@@ -1051,11 +1051,11 @@ class TritonSemantic(Generic[TensorTy]):
         if is_bool:
             elt_ty = tl.int8
             ptr_ty = tl.pointer_type(elt_ty, ptr_ty.address_space)
-            ptr = self.cast(ptr, ptr_ty, self.builder)
+            ptr = self.cast(ptr, ptr_ty)
 
         # Cast `other` into `elt_ty` type
         if other is not None:
-            other = self.cast(other, elt_ty, self.builder)
+            other = self.cast(other, elt_ty)
 
         # Create loaded result type `dst_ty`
         if ptr.type.is_block():
@@ -1077,7 +1077,7 @@ class TritonSemantic(Generic[TensorTy]):
                 self.builder.create_masked_load(ptr.handle, mask.handle, other.handle if other else None, cache, eviction,
                                            is_volatile), dst_ty)
         if ptr.type.scalar == tl.int1:
-            ret = cast(ret, tl.int1, self.builder)
+            ret = cast(ret, tl.int1)
         return ret
 
     def load(self, ptr: TensorTy, mask: Optional[TensorTy], other: Optional[TensorTy], boundary_check: Tuple,
@@ -1579,8 +1579,7 @@ class TritonSemantic(Generic[TensorTy]):
         # max_num_imprecise_acc only applies to fp8 -> fp32 dot on sm_90
         if max_num_imprecise_acc is None:
             if lhs.dtype.is_fp8() and rhs.dtype.is_fp8():
-                # All combinations of supported fp8 x fp8 are permitted
-                pass
+                max_num_imprecise_acc = self.builder.options.max_num_imprecise_acc_default
             else:
                 max_num_imprecise_acc = 0
         else:
