@@ -297,6 +297,6 @@ def benchmark(M, N, K, provider):
 if __name__ == "__main__":
     if is_blackwell():
         print("Running benchmarks...")
-        benchmark.run(show_plots=True, print_data=True)
+        benchmark.run(print_data=True)
     else:
         print("Skipping benchmarks, no Blackwell GPU found.")

@@ -415,6 +415,7 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, mode, provider, device=DEVI
 if __name__ == "__main__":
     if is_hopper():
         print("Running benchmarks...")
+        # bench_flash_attention.run(save_path="~", show_plots=False, print_data=True)
         bench_flash_attention.run(print_data=True)
     else:
         print("Skipping benchmarks, no Hopper GPU found.")
