@@ -40,7 +40,33 @@ if [ "$(ask)" == "yes" ]; then
 fi
 
 
-# Run unit tests
+# Run core triton unit tests
+ask() {
+    retval=""
+    while true; do
+        read -p "Run core Triton python unit tests? {y|n}" yn
+        case $yn in
+            [Yy]* ) retval="yes"; break;;
+            [Nn]* ) retval="no"; break;;
+            * ) echo "Please answer yes or no.";;
+        esac
+    done
+    echo "$retval"
+}
+if [ "$(ask)" == "yes" ]; then
+    echo "Running core Triton python unit tests"
+    pytest python/test/unit/language/*.py
+    pytest python/test/unit/runtime/*.py
+    pytest python/test/unit/cuda/*.py
+    pytest python/test/unit/tools/*.py
+    pytest python/test/unit/instrumentation/*.py
+    pytest python/test/unit/*.py
+    pytest python/test/regression/*.py
+    pytest python/test/backend/test_device_backend.py
+fi
+
+
+# Run TLX unit tests
 ask() {
     retval=""
     while true; do
@@ -54,7 +80,7 @@ ask() {
     echo "$retval"
 }
 if [ "$(ask)" == "yes" ]; then
-    echo "Running TLX tutorial kernels"
+    echo "Running TLX Unit Tests"
     pytest python/test/unit/language/test_tlx.py
 fi
 
