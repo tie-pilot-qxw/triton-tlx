@@ -1601,7 +1601,7 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
         tl.store(z_ptr + offsets, output, mask=mask)
 
         bars = tlx.alloc_barriers(num_barriers=1)
-        clc_mbar = tlx.local_view(bars, 0)
+        clc_mbar = bars[0]
 
         responses = tlx.alloc_clc_responses(num_responses=1)
         clc_response = tlx.local_view(responses, 0)
@@ -1612,6 +1612,7 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
         tlx.clc_issue(clc_response, clc_mbar)
 
         # mbar completion and extract CTA ID
+        # tlx.barrier_wait(clc_mbar, tl.constexpr(0))
         # response = tl.full([1, 1,1,1], -1, tl.int32)
         # tlx.barrier_wait(cta_id, clc_mbar)
 
@@ -1662,6 +1663,10 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
     n_elements = output.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
     kernel = add2_clc[grid](x, y, output, n_elements, BLOCK_SIZE=BLOCK_SIZE, launch_cluster=True)
+    ptx = kernel.asm["ptx"]
+    pattern_clc = (r'clusterlaunchcontrol.try_cancel')
+    assert re.search(pattern_clc, ptx, flags=re.DOTALL)
+
     # ttgir = kernel.asm["ttgir"]
 
     # pattern_ws = (r'ttg.warp_specialize(.*) attributes {requestedRegisters = array<i32: 100, 100>}')
