@@ -315,7 +315,7 @@ def TTNG_AsyncCLCQueryCancelOp : TTNG_Op<"async_clc_query_cancel", []> {
 
   let description = [{
     Extract CTA ID from CLC response stored at the SMEM address pointed
-    and return (xctaid, yctaid, zctaid).
+    and store results to (valid, xctaid, yctaid, zctaid).
 
     https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-clusterlaunchcontrol-query-cancel
   }];
@@ -323,23 +323,12 @@ def TTNG_AsyncCLCQueryCancelOp : TTNG_Op<"async_clc_query_cancel", []> {
   let arguments = (ins
     Arg<TTG_MemDescType, "", [MemWrite<SharedMemory>]>:$clcResAlloc,
     I32:$valid,
-    I32:$ctaId
-    // Variadic<I32>:$ctaId
-    // TT_Tensor:$ctaIdY,
-    // TT_Tensor:$ctaIdZ
-    // I32:$valid,
-    // I32:$ctaIdX,
-    // I32:$ctaIdY,
-    // I32:$ctaIdZ
-    // TODO. use Variadic<I32>?
+    I32:$ctaIdX,
+    I32:$ctaIdY,
+    I32:$ctaIdZ
   );
 
-  // let results = (outs I32:$result);
-
-  // let assemblyFormat = "$clcResAlloc attr-dict `:` type($clcResAlloc) `->` type($result)";
-  // let assemblyFormat = "$clcResAlloc attr-dict `:` type($clcResAlloc)";
-  // let assemblyFormat = "$clcResAlloc`,` $valid`,` $ctaIdX`,` $ctaIdY`,` $ctaIdZ attr-dict `:` type(operands)";
-  let assemblyFormat = "$clcResAlloc`,` $valid`,` $ctaId attr-dict `:` type(operands)";
+  let assemblyFormat = "$clcResAlloc`,` $valid`,` $ctaIdX`,` $ctaIdY`,` $ctaIdZ attr-dict `:` type(operands)";
 }
 
 def TTNG_AsyncTMACopyGlobalToLocalOp : TTNG_Op<"async_tma_copy_global_to_local"> {

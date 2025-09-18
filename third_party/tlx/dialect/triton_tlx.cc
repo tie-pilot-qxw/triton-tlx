@@ -456,8 +456,8 @@ void init_triton_tlx_ir(py::module &&m) {
            })
       .def("clc_query",
            [](TritonOpBuilder &self,
-              Value responseAddr, Value valid, Value ctaId) -> void {
-             self.create<ttng::AsyncCLCQueryCancelOp>(responseAddr, valid, ctaId);
+              Value responseAddr, Value valid, Value ctaIdX, Value ctaIdY, Value ctaIdZ) -> void {
+             self.create<ttng::AsyncCLCQueryCancelOp>(responseAddr, valid, ctaIdX, ctaIdY, ctaIdZ);
            })
       .def("create_async_TMA_load",
            [](TritonOpBuilder &self, Value desc, std::vector<Value> &coord,

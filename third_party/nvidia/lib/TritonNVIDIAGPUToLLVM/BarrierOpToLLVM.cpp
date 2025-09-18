@@ -371,16 +371,17 @@ struct AsyncCLCQueryCancelOpConversion
       ld.shared.b128 clc_result, [$0];
       clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, clc_result;
       selp.u32 $1, 1, 0, p1;
-      @p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {$2, _, _, _}, clc_result;
+      @p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {$2, $3, $4, _}, clc_result;
     }
     )";
 
     PTXBuilder ptxBuilder;
     SmallVector<PTXBuilder::Operand *, 5> operands = {
         ptxBuilder.newOperand(adaptor.getClcResAlloc(), "r"),
-        ptxBuilder.newOperand(adaptor.getValid(), "r"), // 1-bit pred
-        ptxBuilder.newOperand(adaptor.getCtaId(), "r"), // 32-bit pred
-        // TODO. add CTA ID y/z
+        ptxBuilder.newOperand(adaptor.getValid(), "r"), // 32-bit pred (1-bit will fail PTX compiling)
+        ptxBuilder.newOperand(adaptor.getCtaIdX(), "r"), // 32-bit pred
+        ptxBuilder.newOperand(adaptor.getCtaIdY(), "r"), // 32-bit pred
+        ptxBuilder.newOperand(adaptor.getCtaIdZ(), "r"), // 32-bit pred
     };
 
     auto queryOp = *ptxBuilder.create<>(ptx);

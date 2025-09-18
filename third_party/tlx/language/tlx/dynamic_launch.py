@@ -42,7 +42,7 @@ def clc_issue(
 @tl.builtin
 def clc_query(
     clc_response_addr: tlx.clc_response,
-    valid, cta_id,
+    valid, cta_id_x, cta_id_y, cta_id_z,
     _semantic=None,
 ):
     # Extract CTA ID from CLC response
@@ -50,5 +50,7 @@ def clc_query(
     return _semantic.builder.clc_query(
         clc_response_addr.handle,
         valid.handle,
-        cta_id.handle,
+        cta_id_x.handle,
+        cta_id_y.handle,
+        cta_id_z.handle,
     )

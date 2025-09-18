@@ -1614,8 +1614,10 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
 
         # CLC parse CTA ID from response
         valid = 0
-        cta_id = -1
-        tlx.clc_query(clc_response, valid, cta_id)
+        cta_id_x = -1
+        cta_id_y = -1
+        cta_id_z = -1
+        tlx.clc_query(clc_response, valid, cta_id_x, cta_id_y, cta_id_z)
 
     torch.manual_seed(0)
     # number of kernels to launch in a non-persistent mode
@@ -1627,8 +1629,11 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
     n_elements = output.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
     kernel = add2_clc[grid](x, y, output, n_elements, BLOCK_SIZE=BLOCK_SIZE, launch_cluster=True)
+
     ptx = kernel.asm["ptx"]
-    pattern_clc = (r'clusterlaunchcontrol.try_cancel')
-    assert re.search(pattern_clc, ptx, flags=re.DOTALL)
+
+    assert re.search((r'clusterlaunchcontrol.try_cancel'), ptx, flags=re.DOTALL)
+    assert re.search((r'clusterlaunchcontrol.query_cancel.is_canceled.pred.b128'), ptx, flags=re.DOTALL)
+    assert re.search((r'clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128'), ptx, flags=re.DOTALL)
 
     torch.testing.assert_close(output, x+y, check_dtype=False)
