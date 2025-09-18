@@ -1617,43 +1617,6 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
         cta_id = -1
         tlx.clc_query(clc_response, valid, cta_id)
 
-            # if ctaid is NOT valid, exit
-            # if response[0] == 0:
-            #     return
-            # else:
-            #     ctaid = response[1]
-
-            #     offsets = ctaid + tl.range(0, BLOCK_SIZE)
-            #     mask = offsets < n_elements
-
-            #     x = tl.load(x_ptr + offsets, mask=mask)
-            #     y = tl.load(y_ptr + offsets, mask=mask)
-            #     output = x + y
-            #     tl.store(z_ptr + offsets, output, mask=mask)
-
-
-        # block_start = pid * BLOCK_SIZE
-        # with tlx.async_tasks():
-        #     with tlx.async_task("default"):
-        #         offsets = block_start + tl.arange(0, BLOCK_SIZE)
-        #         mask = offsets < n_elements
-        #         x = tl.load(x_ptr + offsets, mask=mask)
-        #         y = tl.load(y_ptr + offsets, mask=mask)
-        #         output = x + y
-        #         tl.store(z_ptr + offsets, output, mask=mask)
-        #     with tlx.async_task(num_warps=1, registers=100, replicate=2):
-        #         offsets = block_start + tl.arange(0, BLOCK_SIZE)
-        #         mask = offsets < n_elements
-        #         a = tl.load(a_ptr + offsets, mask=mask)
-        #         b = tl.load(b_ptr + offsets, mask=mask)
-        #         replica_id = tlx.async_task_replica_id()
-        #         # This no-op is just to test that replica_id
-        #         # is correctly passed to the kernel
-        #         a1 = a + replica_id
-        #         b1 = b - replica_id
-        #         output = a1 + b1
-        #         tl.store(c_ptr + offsets, output, mask=mask)
-
     torch.manual_seed(0)
     # number of kernels to launch in a non-persistent mode
     size = 100000

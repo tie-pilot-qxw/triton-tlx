@@ -364,12 +364,6 @@ struct AsyncCLCQueryCancelOpConversion
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
 
-    // Value valid, xctaid, yctaid, zctaid;
-
-    // TritonLLVMOpBuilder b(op.getLoc(), rewriter);
-    // Value id = getThreadId(rewriter, op.getLoc());
-    // Value valid = b.icmp_eq(id, b.i32_val(0));
-
     std::string ptx = R"(
     {
       .reg .pred p1;
@@ -386,28 +380,13 @@ struct AsyncCLCQueryCancelOpConversion
         ptxBuilder.newOperand(adaptor.getClcResAlloc(), "r"),
         ptxBuilder.newOperand(adaptor.getValid(), "r"), // 1-bit pred
         ptxBuilder.newOperand(adaptor.getCtaId(), "r"), // 32-bit pred
-        // ptxBuilder.newOperand(adaptor.getCtaId()[1], "r"), // 32-bit pred
-        // ptxBuilder.newOperand(adaptor.getCtaId()[2], "r"), // 32-bit pred
+        // TODO. add CTA ID y/z
     };
 
     auto queryOp = *ptxBuilder.create<>(ptx);
     queryOp(operands, /*onlyAttachMLIRArgs=*/true);
     auto voidTy = void_ty(getContext());
     ptxBuilder.launch(rewriter, op.getLoc(), voidTy);
-
-    // SmallVector<Value> resultVals;
-    // resultVals.reserve(4);
-    // resultVals.push_back(valid); // 0 or 1
-    // resultVals.push_back(xctaid);
-    // resultVals.push_back(yctaid);
-    // resultVals.push_back(zctaid);
-    // auto typeConverter = getTypeConverter();
-    // auto resultTy = cast<RankedTensorType>(op.getType());
-    // Value ret =
-    //    packLLElements(loc, typeConverter, resultVals, rewriter, resultTy);
-    // Value ret = 100;
-
-    // rewriter.replaceOp(op, valid);
     rewriter.eraseOp(op);
     return success();
   }

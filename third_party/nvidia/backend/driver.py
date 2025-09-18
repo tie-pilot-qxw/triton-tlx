@@ -662,7 +662,6 @@ def wrap_handle_tensordesc(launcher, tensordesc_meta):
         raw_kernel_args = args[len(_BASE_ARGS_FORMAT):]
         tensordesc_idx = 0
         final_args = []
-        import pdb; pdb.set_trace()
         for i, arg in enumerate(raw_kernel_args):
             if isinstance(arg, (TensorDescriptor, GluonTensorDescriptor)):
                 meta = tensordesc_meta[tensordesc_idx] if tensordesc_meta else None
