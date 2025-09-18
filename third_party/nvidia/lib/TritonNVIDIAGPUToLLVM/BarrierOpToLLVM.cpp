@@ -328,7 +328,7 @@ struct AsyncCLCTryCancelOpConversion
   matchAndRewrite(triton::nvidia_gpu::AsyncCLCTryCancelOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
-    std::string ptxAsm =
+    std::string ptx =
         "clusterlaunchcontrol.try_cancel.async.shared::cta.mbarrier::complete_"
         "tx::bytes.multicast::cluster::all.b128 [$0], [$1];";
 
@@ -337,7 +337,7 @@ struct AsyncCLCTryCancelOpConversion
         ptxBuilder.newOperand(adaptor.getClcResAlloc(), "r"),
         ptxBuilder.newOperand(adaptor.getMbarAlloc(), "r")};
 
-    auto clcOp = *ptxBuilder.create<>(ptxAsm);
+    auto clcOp = *ptxBuilder.create<>(ptx);
     clcOp(operands, /*onlyAttachMLIRArgs=*/true);
     auto voidTy = void_ty(getContext());
     ptxBuilder.launch(rewriter, op.getLoc(), voidTy);
@@ -364,27 +364,30 @@ struct AsyncCLCQueryCancelOpConversion
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = op->getLoc();
 
-    Value valid, xctaid, yctaid, zctaid;
+    // Value valid, xctaid, yctaid, zctaid;
+
+    // TritonLLVMOpBuilder b(op.getLoc(), rewriter);
+    // Value id = getThreadId(rewriter, op.getLoc());
+    // Value valid = b.icmp_eq(id, b.i32_val(0));
 
     std::string ptx = R"(
     {
-      .reg .pred complete;
+      .reg .pred p1;
       .reg .b128 clc_result;
       ld.shared.b128 clc_result, [$0];
       clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 p1, clc_result;
-      selp.u32 $1, 1, 0, p1
-      @p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {$2,
-      $3, $4, _}, clc_result
+      selp.u32 $1, 1, 0, p1;
+      @p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {$2, _, _, _}, clc_result;
     }
     )";
 
     PTXBuilder ptxBuilder;
     SmallVector<PTXBuilder::Operand *, 5> operands = {
-        ptxBuilder.newOperand(adaptor.getResponseAddr(), "r"),
-        ptxBuilder.newOperand(valid, "b"),  // 1-bit pred
-        ptxBuilder.newOperand(xctaid, "r"), // 32-bit int
-        ptxBuilder.newOperand(yctaid, "r"),
-        ptxBuilder.newOperand(zctaid, "r"),
+        ptxBuilder.newOperand(adaptor.getClcResAlloc(), "r"),
+        ptxBuilder.newOperand(adaptor.getValid(), "r"), // 1-bit pred
+        ptxBuilder.newOperand(adaptor.getCtaId(), "r"), // 32-bit pred
+        // ptxBuilder.newOperand(adaptor.getCtaId()[1], "r"), // 32-bit pred
+        // ptxBuilder.newOperand(adaptor.getCtaId()[2], "r"), // 32-bit pred
     };
 
     auto queryOp = *ptxBuilder.create<>(ptx);
@@ -392,18 +395,20 @@ struct AsyncCLCQueryCancelOpConversion
     auto voidTy = void_ty(getContext());
     ptxBuilder.launch(rewriter, op.getLoc(), voidTy);
 
-    SmallVector<Value> resultVals;
-    resultVals.reserve(4);
-    resultVals.push_back(valid); // 0 or 1
-    resultVals.push_back(xctaid);
-    resultVals.push_back(yctaid);
-    resultVals.push_back(zctaid);
-    auto typeConverter = getTypeConverter();
-    auto resultTy = cast<RankedTensorType>(op.getType());
-    Value ret =
-        packLLElements(loc, typeConverter, resultVals, rewriter, resultTy);
+    // SmallVector<Value> resultVals;
+    // resultVals.reserve(4);
+    // resultVals.push_back(valid); // 0 or 1
+    // resultVals.push_back(xctaid);
+    // resultVals.push_back(yctaid);
+    // resultVals.push_back(zctaid);
+    // auto typeConverter = getTypeConverter();
+    // auto resultTy = cast<RankedTensorType>(op.getType());
+    // Value ret =
+    //    packLLElements(loc, typeConverter, resultVals, rewriter, resultTy);
+    // Value ret = 100;
 
-    rewriter.replaceOp(op, ret);
+    // rewriter.replaceOp(op, valid);
+    rewriter.eraseOp(op);
     return success();
   }
 };

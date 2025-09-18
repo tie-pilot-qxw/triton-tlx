@@ -1606,15 +1606,16 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
         responses = tlx.alloc_clc_responses(num_responses=1)
         clc_response = tlx.local_view(responses, 0)
 
-        # while True:
-
         # CLC issue and wait
         tlx.clc_issue(clc_response, clc_mbar)
 
         # mbar completion and extract CTA ID
-        # tlx.barrier_wait(clc_mbar, tl.constexpr(0))
-        # response = tl.full([1, 1,1,1], -1, tl.int32)
-        # tlx.barrier_wait(cta_id, clc_mbar)
+        tlx.barrier_wait(clc_mbar, 1)
+
+        # CLC parse CTA ID from response
+        valid = 0
+        cta_id = -1
+        tlx.clc_query(clc_response, valid, cta_id)
 
             # if ctaid is NOT valid, exit
             # if response[0] == 0:
@@ -1666,33 +1667,5 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
     ptx = kernel.asm["ptx"]
     pattern_clc = (r'clusterlaunchcontrol.try_cancel')
     assert re.search(pattern_clc, ptx, flags=re.DOTALL)
-
-    # ttgir = kernel.asm["ttgir"]
-
-    # pattern_ws = (r'ttg.warp_specialize(.*) attributes {requestedRegisters = array<i32: 100, 100>}')
-    # assert re.search(pattern_ws, ttgir, flags=re.DOTALL)
-    # pattern_p0 = (r'partition0(.*) num_warps\(1\)')
-    # assert re.search(pattern_p0, ttgir, flags=re.DOTALL)
-    # pattern_p1 = (r'partition1(.*) num_warps\(1\)')
-    # assert re.search(pattern_p1, ttgir, flags=re.DOTALL)
-
-    # Check that the replica_id is correctly passed to non-default regions
-    # TTIR/TTGIR should be something like:
-    #  partition0(...) {
-    #   %cst = arith.constant dense<0.000000e+00> : tensor<1024xf32, #blocked>
-    #   ...
-    #   %13 = arith.addf %9, %cst
-    #   ...}
-    #  partition1(...) {
-    #   %cst = arith.constant dense<1.000000e+00> : tensor<1024xf32, #blocked>
-    #   ...
-    #   %13 = arith.addf %9, %cst
-    #   %14 = arith.subf %12, %cst
-    #   ...}
-    # pattern_cst = (r'cst = arith.constant dense\<.*\>')
-    # found = re.findall(pattern_cst, ttgir)
-    # assert len(found) == 2, "Expected 2 cst by calling `tlx.async_task_replica_id()` in two regions"
-    # assert found[0] != found[1], "Two matches MUST be different"
-    # assert "dense<0.0" in found[0] and "dense<1.0" in found[1], "Expected 0.0 and 1.0 as replica_id"
 
     torch.testing.assert_close(output, x+y, check_dtype=False)
