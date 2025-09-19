@@ -1636,4 +1636,4 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
     assert re.search((r'clusterlaunchcontrol.query_cancel.is_canceled.pred.b128'), ptx, flags=re.DOTALL)
     assert re.search((r'clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128'), ptx, flags=re.DOTALL)
 
-    torch.testing.assert_close(output, x+y, check_dtype=False)
+    torch.testing.assert_close(output, x + y, check_dtype=False)

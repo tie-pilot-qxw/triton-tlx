@@ -378,7 +378,9 @@ struct AsyncCLCQueryCancelOpConversion
     PTXBuilder ptxBuilder;
     SmallVector<PTXBuilder::Operand *, 5> operands = {
         ptxBuilder.newOperand(adaptor.getClcResAlloc(), "r"),
-        ptxBuilder.newOperand(adaptor.getValid(), "r"), // 32-bit pred (1-bit will fail PTX compiling)
+        ptxBuilder.newOperand(
+            adaptor.getValid(),
+            "r"), // 32-bit pred (1-bit will fail PTX compiling)
         ptxBuilder.newOperand(adaptor.getCtaIdX(), "r"), // 32-bit pred
         ptxBuilder.newOperand(adaptor.getCtaIdY(), "r"), // 32-bit pred
         ptxBuilder.newOperand(adaptor.getCtaIdZ(), "r"), // 32-bit pred

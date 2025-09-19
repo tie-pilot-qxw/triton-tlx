@@ -4,6 +4,7 @@ from . import types as tlx
 
 # Blackwell-only
 
+
 @tl.builtin
 def alloc_clc_responses(
     num_responses: tl.constexpr,
@@ -19,13 +20,8 @@ def alloc_clc_responses(
         layout.numCTASplit,
         layout.numCTAOrder,
     )
-    return tlx.clc_response(
-        _semantic.builder.create_alloc_clc_responses(
-            num_responses.value,
-            layout_handle),
-        num_responses,
-        layout,
-        _semantic)
+    return tlx.clc_response(_semantic.builder.create_alloc_clc_responses(num_responses.value, layout_handle),
+                            num_responses, layout, _semantic)
 
 
 @tl.builtin
@@ -42,7 +38,10 @@ def clc_issue(
 @tl.builtin
 def clc_query(
     clc_response_addr: tlx.clc_response,
-    valid, cta_id_x, cta_id_y, cta_id_z,
+    valid,
+    cta_id_x,
+    cta_id_y,
+    cta_id_z,
     _semantic=None,
 ):
     # Extract CTA ID from CLC response

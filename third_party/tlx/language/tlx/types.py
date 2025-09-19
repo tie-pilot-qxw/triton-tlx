@@ -329,7 +329,8 @@ class clc_response(tl.base_value):
     Define a CLC response object
     """
 
-    def __init__(self, handle, num: int, layout: Optional[swizzled_shared_layout_encoding], semantic: TritonSemantic = None):
+    def __init__(self, handle, num: int, layout: Optional[swizzled_shared_layout_encoding],
+                 semantic: TritonSemantic = None):
         self.handle = handle
         self.type = clc_response_type(num, layout, semantic)
         self.num = num
@@ -358,7 +359,7 @@ class clc_response_type(buffered_tensor_type):
         return value, cursor + 1
 
     def to_ir(self, builder: ir.builder) -> None:
-        builder=semantic.builder
+        builder = self.semantic.builder
         if self.num >= 1:
             shape = [self.num]
         else:
