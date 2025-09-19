@@ -1615,8 +1615,8 @@ def test_cluster_launch_control(BLOCK_SIZE, device):
         # CLC parse CTA ID from response
         valid = 0
         cta_id_x = -1
-        cta_id_y = -1
-        cta_id_z = -1
+        cta_id_y = -2
+        cta_id_z = -3
         tlx.clc_query(clc_response, valid, cta_id_x, cta_id_y, cta_id_z)
 
     torch.manual_seed(0)
