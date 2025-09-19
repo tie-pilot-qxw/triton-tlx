@@ -21,12 +21,11 @@ with pytest.raises(ImportError):
     # added by https://github.com/triton-lang/triton/pull/2476
     # no longer exist even in upstream
     # We disable the whole test for now
+
     from triton.common.backend import (BaseBackend, compute_core_version_key, register_backend)
     from triton.compiler.make_launcher import make_so_cache_key
-
     from triton.runtime.cache import get_cache_manager
     from triton.runtime.driver import DriverBase
-
 
     def build_for_backend(name, src, srcdir):
         suffix = sysconfig.get_config_var('EXT_SUFFIX')
@@ -52,7 +51,6 @@ with pytest.raises(ImportError):
 
         subprocess.check_call([cc, src, f"-I{py_include_dir}", f"-I{srcdir}", "-shared", "-fPIC", "-o", so])
         return so
-
 
     class ExtensionUtils:
 
@@ -83,7 +81,6 @@ with pytest.raises(ImportError):
             self.load_binary = mod.load_binary
             self.get_device_properties = mod.get_device_properties
 
-
     class ExtensionDriver(DriverBase):
 
         def __new__(cls):
@@ -93,7 +90,6 @@ with pytest.raises(ImportError):
 
         def __init__(self):
             self.utils = ExtensionUtils()
-
 
     class ExtensionBackend(BaseBackend):
         stub_so_path = ""
@@ -213,7 +209,6 @@ with pytest.raises(ImportError):
             """
 
             return src
-
 
     def test_dummy_backend():
         register_backend("cpu", ExtensionBackend)

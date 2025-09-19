@@ -137,7 +137,6 @@ LogicalResult LayoutBackwardPropagation::visitOperation(
                                 updatedResultLayoutEncoding);
       }
     }
-
     return success();
   }
 
