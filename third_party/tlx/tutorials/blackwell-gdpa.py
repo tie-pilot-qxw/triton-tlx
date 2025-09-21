@@ -62,7 +62,7 @@ def get_cuda_autotune_config():
             for bqk in [1]  # in tmem
             for bo in [1]  # in tmem
             for SUBTILE in [True]  # doesn't support False
-            for pp in [False]
+            for pp in [True]
             for ar in [232]
         ]
     else:
@@ -330,6 +330,7 @@ def gdpa_kernel_tma_ws_blackwell(
     SUBTILING: tl.constexpr,
     PINGPONG: tl.constexpr,
     ACT_REGS: tl.constexpr,
+    NAME_BARRIER: tl.constexpr,
     MERGE_EPI: tl.constexpr,
     ENABLE_PROTON: tl.constexpr,
     PROTON_TILE: tl.constexpr,
@@ -411,6 +412,8 @@ def gdpa_kernel_tma_ws_blackwell(
     producer_commit_o0 = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_O, arrive_count=1)
     producer_o1 = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_O, arrive_count=1)
     producer_commit_o1 = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_O, arrive_count=1)
+    producer_pp = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_O, arrive_count=1)
+    producer_commit_pp = tlx.alloc_barriers(num_barriers=NUM_BUFFERS_O, arrive_count=1)
 
     with tlx.async_tasks():
         # activation calculation
@@ -473,7 +476,11 @@ def gdpa_kernel_tma_ws_blackwell(
                         if ENABLE_PROTON and idx == PROTON_TILE:
                             pl.exit_scope("elementwise_0")
                         if PINGPONG:
-                            tlx.named_barrier_wait(9, 128)
+                            if NAME_BARRIER:
+                                tlx.named_barrier_wait(9, 128)
+                            else:
+                                # assume NUM_BUFFERS_QK is 1
+                                tlx.barrier_wait(producer_pp[0], phase ^ 1)  # acquire
                         # p0 = fast_gelu(qk0)
                         if ENABLE_PROTON and idx == PROTON_TILE:
                             pl.enter_scope("tanh")
@@ -495,8 +502,10 @@ def gdpa_kernel_tma_ws_blackwell(
                         if ENABLE_PROTON and idx == PROTON_TILE:
                             pl.exit_scope("tanh")
                         if PINGPONG:
-                            tlx.named_barrier_arrive(10, 128)
-
+                            if NAME_BARRIER:
+                                tlx.named_barrier_arrive(10, 128)
+                            else:
+                                tlx.barrier_arrive(producer_commit_pp[0], 1)
                         # wait for o0, o1 per iteration
                         bufIdx = accum_cnt % NUM_BUFFERS_O
                         phase = (accum_cnt // NUM_BUFFERS_O) & 1
@@ -550,7 +559,8 @@ def gdpa_kernel_tma_ws_blackwell(
             accum_cnt = 0
             accum_cnt_outer = 0
             if PINGPONG:
-                tlx.named_barrier_arrive(9, 128)
+                if NAME_BARRIER:
+                    tlx.named_barrier_arrive(9, 128)
             for idx in range(0, tiles_per_sm):
                 if ENABLE_PROTON and idx == PROTON_TILE:
                     pl.enter_scope("ele1_tile")
@@ -602,7 +612,10 @@ def gdpa_kernel_tma_ws_blackwell(
                         if ENABLE_PROTON and idx == PROTON_TILE:
                             pl.exit_scope("elementwise_1")
                         if PINGPONG:
-                            tlx.named_barrier_wait(10, 128)
+                            if NAME_BARRIER:
+                                tlx.named_barrier_wait(10, 128)
+                            else:
+                                tlx.barrier_wait(producer_commit_pp[0], phase)  # consumer_wait
                         # p0 = fast_gelu(qk0)
                         if ENABLE_PROTON and idx == PROTON_TILE:
                             pl.enter_scope("tanh")
@@ -624,7 +637,10 @@ def gdpa_kernel_tma_ws_blackwell(
                         if ENABLE_PROTON and idx == PROTON_TILE:
                             pl.exit_scope("tanh")
                         if PINGPONG:
-                            tlx.named_barrier_arrive(9, 128)
+                            if NAME_BARRIER:
+                                tlx.named_barrier_arrive(9, 128)
+                            else:
+                                tlx.barrier_arrive(producer_pp[0], 1)
 
                         # wait for o0, o1 per iteration
                         bufIdx = accum_cnt % NUM_BUFFERS_O
@@ -1402,6 +1418,7 @@ def gdpa_forward_tlx(
         IS_DENSE_KV=is_dense_kv,
         activation_enum_int=activation_enum_int,
         USE_ON_DEVICE_TMA=USE_ON_DEVICE_TMA,
+        NAME_BARRIER=False,
         MERGE_EPI=False,
         ENABLE_PROTON=enable_proton,
         PROTON_TILE=10,
@@ -1684,7 +1701,7 @@ def profile_tlx_gdpa(config):
     if warp_sampling:
         # warp sampling: only capture warp 0, 4, 10, 11
         mode = proton.mode.Default(metric_type="cycle", optimizations="clock32,time_shift",
-                                   sampling_strategy="selective", sampling_options="0, 4, 10, 11")
+                                   sampling_strategy="selective", sampling_options="0, 4, 8, 9")
     else:
         # all warps
         mode = proton.mode.Default(metric_type="cycle", optimizations="clock32,time_shift")
