@@ -66,7 +66,17 @@ def test_async_tasks(BLOCK_SIZE, device):
     output2 = torch.empty_like(a)
     n_elements = output1.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
-    kernel = add2_warp_specialized_kernel[grid](x, y, output1, a, b, output2, n_elements, BLOCK_SIZE, num_warps=4,)
+    kernel = add2_warp_specialized_kernel[grid](
+        x,
+        y,
+        output1,
+        a,
+        b,
+        output2,
+        n_elements,
+        BLOCK_SIZE,
+        num_warps=4,
+    )
     ttgir = kernel.asm["ttgir"]
     # print(ttgir)
     pattern_ws = (r'ttg.warp_specialize(.*) attributes {requestedRegisters = array<i32: 120, 100, 100>}')
