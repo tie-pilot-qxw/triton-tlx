@@ -182,8 +182,7 @@ void init_triton_tlx_ir(py::module &&m) {
                                                   defaultBlockedEncoding);
              auto oldTypeShapePerCTA = ttg::getShapePerCTA(oldType);
              auto rank = oldTypeShapePerCTA.size();
-             assert((oldTypeShapePerCTA[rank - 2] % 64 == 0 &&
-                     oldTypeShapePerCTA[rank - 1] % 8 == 0) &&
+             assert(oldTypeShapePerCTA[rank - 2] % 64 == 0 &&
                     "Shape unsupported by TMEM ops.");
 
              Attribute newDistributedEncoding =
