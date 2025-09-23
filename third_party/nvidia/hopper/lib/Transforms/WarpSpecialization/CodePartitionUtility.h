@@ -59,6 +59,8 @@ public:
   virtual Operation *getSrcOp() { return getSrcOperand().getDefiningOp(); }
   virtual Operation *getAllocOp() { return nullptr; }
   virtual unsigned getNumBuffers() { return _numBuffers; }
+  virtual Operation *getDstOpLast() { return nullptr; }
+  virtual void getDstOps(SmallVector<Operation *> &dsts) {}
 
   Relation relation; // producer task Id, a list of consumer task Ids
   Operation *op;
@@ -91,8 +93,8 @@ public:
 
   virtual Operation *getSrcOp();
   virtual Operation *getDstOp();
-  Operation *getDstOpLast();
-  void getDstOps(SmallVector<Operation *> &dsts);
+  virtual Operation *getDstOpLast();
+  virtual void getDstOps(SmallVector<Operation *> &dsts);
   virtual Operation *getAllocOp() { return allocOp; }
   virtual unsigned getNumBuffers();
 
@@ -168,6 +170,8 @@ struct TmemDataChannelPost : Channel {
   virtual Operation *getDstOp();
   virtual unsigned getNumBuffers();
   virtual Operation *getAllocOp() { return allocOp; }
+  virtual Operation *getDstOpLast();
+  virtual void getDstOps(SmallVector<Operation *> &dsts);
 };
 } // namespace nvidia_gpu
 } // namespace triton
@@ -246,6 +250,7 @@ Value createBufferView(OpBuilderWithAsyncTaskIds &builder, Value alloc,
 void collectPostChannels(SmallVector<std::unique_ptr<Channel>> &channels,
                          triton::FuncOp &funcOp);
 
+Operation *getSameLevelOp(Operation *p, Operation *c);
 } // namespace mlir
 
 #endif // NV_DIALECT_HOPPER_TRANSFORMS_CODEPARTITIONUTILITY_H_
