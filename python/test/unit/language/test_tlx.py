@@ -29,12 +29,15 @@ def test_async_tasks(BLOCK_SIZE, device):
         pid = tl.program_id(axis=0)
         block_start = pid * BLOCK_SIZE
         with tlx.async_tasks():
-            with tlx.async_task("default"):
+            with tlx.async_task("default", registers=120, replicate=2):
                 offsets = block_start + tl.arange(0, BLOCK_SIZE)
                 mask = offsets < n_elements
                 x = tl.load(x_ptr + offsets, mask=mask)
                 y = tl.load(y_ptr + offsets, mask=mask)
-                output = x + y
+                replica_id = tlx.async_task_replica_id()
+                x1 = x + replica_id
+                y1 = y - replica_id
+                output = x1 + y1
                 tl.store(z_ptr + offsets, output, mask=mask)
             with tlx.async_task(num_warps=1, registers=100, replicate=2):
                 offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -63,15 +66,27 @@ def test_async_tasks(BLOCK_SIZE, device):
     output2 = torch.empty_like(a)
     n_elements = output1.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
-    kernel = add2_warp_specialized_kernel[grid](x, y, output1, a, b, output2, n_elements, BLOCK_SIZE)
+    kernel = add2_warp_specialized_kernel[grid](
+        x,
+        y,
+        output1,
+        a,
+        b,
+        output2,
+        n_elements,
+        BLOCK_SIZE,
+        num_warps=4,
+    )
     ttgir = kernel.asm["ttgir"]
-
-    pattern_ws = (r'ttg.warp_specialize(.*) attributes {requestedRegisters = array<i32: 100, 100>}')
+    # print(ttgir)
+    pattern_ws = (r'ttg.warp_specialize(.*) attributes {requestedRegisters = array<i32: 120, 100, 100>}')
     assert re.search(pattern_ws, ttgir, flags=re.DOTALL)
-    pattern_p0 = (r'partition0(.*) num_warps\(1\)')
+    pattern_p0 = (r'partition0\([^\n]*\)\s+num_warps\(4\)')
     assert re.search(pattern_p0, ttgir, flags=re.DOTALL)
-    pattern_p1 = (r'partition1(.*) num_warps\(1\)')
+    pattern_p1 = (r'partition1\([^\n]*\)\s+num_warps\(1\)')
     assert re.search(pattern_p1, ttgir, flags=re.DOTALL)
+    pattern_p2 = (r'partition2\([^\n]*\)\s+num_warps\(1\)')
+    assert re.search(pattern_p2, ttgir, flags=re.DOTALL)
 
     # Check that the replica_id is correctly passed to non-default regions
     # TTIR/TTGIR should be something like:
@@ -88,7 +103,7 @@ def test_async_tasks(BLOCK_SIZE, device):
     #   ...}
     pattern_cst = (r'= arith.constant dense\<.*\>')
     found = re.findall(pattern_cst, ttgir)
-    assert len(found) == 2, "Expected 2 cst by calling `tlx.async_task_replica_id()` in two regions"
+    assert len(found) == 4, "Expected 4 cst by calling `tlx.async_task_replica_id()` in all regions"
     assert found[0] != found[1], "Two matches MUST be different"
     assert "dense<0.0" in found[0] and "dense<1.0" in found[1], "Expected 0.0 and 1.0 as replica_id"
 
