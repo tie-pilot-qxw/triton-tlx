@@ -62,6 +62,51 @@ static void updateLiveOpsInOneBlock(Channel *TheCh, OperationListT &liveOps) {
   }
 }
 
+static void updateLiveOpsAcrossScopes(DenseSet<Operation *> &users,
+                                      OperationListT &liveOps) {
+  DenseSet<Operation *> userScopes; // users in the same scope
+  bool first = true;
+  for (auto user : users) {
+    if (first) {
+      userScopes.insert(user);
+    } else {
+      // We may need to lift the scopes in userScopes.
+      auto *scope = *(userScopes.begin());
+      auto *sameLevel = getSameLevelOp(user, scope);
+      if (sameLevel->getBlock() == user->getBlock()) {
+        // user stays unchanged, scope gets lifted to sameLevel.
+        userScopes.clear();
+        userScopes.insert(sameLevel);
+        userScopes.insert(user);
+      } else {
+        // scope stays unchanged, user gets lifted to sameLevel.
+        userScopes.insert(sameLevel);
+      }
+    }
+    first = false;
+  }
+  // Find the block that contains all users
+  bool foundStart = false;
+  auto *scope = *(userScopes.begin());
+  Operation *lastDst = nullptr;
+  for (auto &op : scope->getBlock()->getOperations()) {
+    if (userScopes.count(&op)) {
+      lastDst = &op;
+    }
+  }
+  for (auto &op : scope->getBlock()->getOperations()) {
+    if (userScopes.count(&op) || foundStart) {
+      foundStart = true;
+      // Goes through nested regions.
+      op.walk<WalkOrder::PostOrder>(
+          [&](Operation *nestedOp) { liveOps.push_back(nestedOp); });
+    }
+    if (&op == lastDst) {
+      break;
+    }
+  }
+}
+
 namespace triton {
 // A simplified version of AllocationAnalysis.
 class MemoryPlanner {
@@ -123,14 +168,28 @@ private:
     ChannelPost *TheCh =
         static_cast<ChannelPost *>(findChannelForAlloc(value, *channels));
     std::vector<Operation *> liveOps;
-    updateLiveOpsInOneBlock(TheCh, liveOps);
+    DenseSet<Operation *> users;
+    Operation *src = TheCh->getSrcOp();
+    SmallVector<Operation *> dsts;
+    TheCh->getDstOps(dsts);
+    users.insert(src);
+    for (auto *op : dsts) {
+      auto actual = getActualConsumers(op);
+      for (auto *tOp : actual)
+        users.insert(tOp);
+    }
+    updateLiveOpsAcrossScopes(users, liveOps);
     return liveOps;
   }
 
   void resolveLiveness() {
     DenseMap<Operation *, size_t> operationId;
-    operation->walk<WalkOrder::PostOrder>(
-        [&](Operation *op) { operationId[op] = operationId.size(); });
+    operation->walk<WalkOrder::PostOrder>([&](Operation *op) {
+      op->setAttr("operation_id",
+                  IntegerAttr::get(IntegerType::get(op->getContext(), 32),
+                                   operationId.size()));
+      operationId[op] = operationId.size();
+    });
 
     // Analyze liveness of explicit buffers
     Liveness liveness(operation);
@@ -186,47 +245,10 @@ public:
 static void handleOperandD(ttng::TMEMAllocOp tmemAllocOp,
                            std::vector<Operation *> &liveOps) {
   DenseSet<Operation *> users;
-  DenseSet<Operation *> userScopes; // users in the same scope
-  bool first = true;
   for (auto user : tmemAllocOp.getResult().getUsers()) {
     users.insert(user);
-    if (first) {
-      userScopes.insert(user);
-    } else {
-      // We may need to lift the scopes in userScopes.
-      auto *scope = *(userScopes.begin());
-      auto *sameLevel = getSameLevelOp(user, scope);
-      if (sameLevel->getBlock() == user->getBlock()) {
-        // user stays unchanged, scope gets lifted to sameLevel.
-        userScopes.clear();
-        userScopes.insert(sameLevel);
-      } else {
-        // scope stays unchanged.
-        userScopes.insert(sameLevel);
-      }
-    }
-    first = false;
   }
-  // Find the block that contains all users
-  bool foundStart = false;
-  auto *scope = *(userScopes.begin());
-  Operation *lastDst = nullptr;
-  for (auto &op : scope->getBlock()->getOperations()) {
-    if (userScopes.count(&op)) {
-      lastDst = &op;
-    }
-  }
-  for (auto &op : scope->getBlock()->getOperations()) {
-    if (userScopes.count(&op) || foundStart) {
-      foundStart = true;
-      // Goes through nested regions.
-      op.walk<WalkOrder::PostOrder>(
-          [&](Operation *nestedOp) { liveOps.push_back(nestedOp); });
-    }
-    if (&op == lastDst) {
-      break;
-    }
-  }
+  updateLiveOpsAcrossScopes(users, liveOps);
 }
 
 // Return the list of operations where value is live.
@@ -241,8 +263,17 @@ OperationListT livenessForTmemChannel(Value value,
   if (TheCh->isOperandD) {
     handleOperandD(cast<ttng::TMEMAllocOp>(TheCh->getAllocOp()), liveOps);
   } else {
-    // Assume a single producer, multiple consumers all under the same block.
-    updateLiveOpsInOneBlock(TheCh, liveOps);
+    DenseSet<Operation *> users;
+    Operation *src = TheCh->getSrcOp();
+    SmallVector<Operation *> dsts;
+    TheCh->getDstOps(dsts);
+    users.insert(src);
+    for (auto *op : dsts) {
+      auto actual = getActualConsumers(op);
+      for (auto *tOp : actual)
+        users.insert(tOp);
+    }
+    updateLiveOpsAcrossScopes(users, liveOps);
   }
   return liveOps;
 }

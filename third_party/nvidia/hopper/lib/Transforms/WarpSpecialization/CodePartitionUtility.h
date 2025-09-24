@@ -251,6 +251,7 @@ void collectPostChannels(SmallVector<std::unique_ptr<Channel>> &channels,
                          triton::FuncOp &funcOp);
 
 Operation *getSameLevelOp(Operation *p, Operation *c);
+SmallVector<Operation *> getActualConsumers(Operation *consumerOp);
 } // namespace mlir
 
 #endif // NV_DIALECT_HOPPER_TRANSFORMS_CODEPARTITIONUTILITY_H_
