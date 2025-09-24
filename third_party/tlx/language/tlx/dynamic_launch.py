@@ -32,6 +32,8 @@ def clc_issue(
 ):
     # Issue async `clusterlaunchcontrol.try_cancel` request for
     # CTA ID of available cluster
+    assert type(clc_response_addr) == tlx.clc_response
+
     return _semantic.builder.clc_issue(clc_response_addr.handle, barrier.handle)
 
 
@@ -46,6 +48,8 @@ def clc_query(
 ):
     # Extract CTA ID from CLC response
     # Return success/fail of PTX instruction
+    assert type(clc_response_addr) == tlx.clc_response
+
     return _semantic.builder.clc_query(
         clc_response_addr.handle,
         valid.handle,
