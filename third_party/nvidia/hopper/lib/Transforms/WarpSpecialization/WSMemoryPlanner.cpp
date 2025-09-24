@@ -33,6 +33,19 @@ static bool isInnermostLoop(scf::ForOp forOp) {
   return true;
 }
 
+static Channel *findChannelForOp(Operation *op,
+                                 SmallVector<Channel *> &channels) {
+  Channel *TheCh = nullptr;
+  for (auto *ch : channels) {
+    Operation *alloc = ch->getAllocOp();
+    if (alloc == op) {
+      TheCh = ch;
+      break;
+    }
+  }
+  return TheCh;
+}
+
 static Channel *findChannelForAlloc(Value value,
                                     SmallVector<Channel *> &channels) {
   Operation *op = value.getDefiningOp();
@@ -244,10 +257,29 @@ public:
     // FIXME: reuse for buffers in inner most loop, set copy to numBuffers.
     unsigned bufferId = 0;
     int bufferIdInnermost = -1;
+    auto usedInnermostLoop = [&](Operation *alloc) -> bool {
+      ChannelPost *TheCh =
+          static_cast<ChannelPost *>(findChannelForOp(alloc, *channels));
+      DenseSet<Operation *> users;
+      Operation *src = TheCh->getSrcOp();
+      SmallVector<Operation *> dsts;
+      TheCh->getDstOps(dsts);
+      users.insert(src);
+      for (auto *op : dsts) {
+        auto actual = getActualConsumers(op);
+        for (auto *tOp : actual)
+          users.insert(tOp);
+      }
+      // All users are in the same block and in the innermost loop.
+      for (auto *user : users) {
+        if (user->getBlock() != src->getBlock())
+          return false;
+      }
+      return isInnermostLoop(src->getParentOfType<scf::ForOp>());
+    };
     for (auto bufferIter : bufferRange) {
       Operation *owner = bufferIter.first->owner;
-      auto parent = owner->getParentOfType<scf::ForOp>();
-      if (isInnermostLoop(parent)) {
+      if (usedInnermostLoop(owner)) {
         if (bufferIdInnermost < 0) {
           bufferIdInnermost = bufferId;
           ++bufferId;
