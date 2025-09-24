@@ -215,9 +215,10 @@ private:
   void resolveLiveness() {
     DenseMap<Operation *, size_t> operationId;
     operation->walk<WalkOrder::PostOrder>([&](Operation *op) {
-      op->setAttr("operation_id",
-                  IntegerAttr::get(IntegerType::get(op->getContext(), 32),
-                                   operationId.size()));
+      LLVM_DEBUG(
+          op->setAttr("operation_id",
+                      IntegerAttr::get(IntegerType::get(op->getContext(), 32),
+                                       operationId.size())));
       operationId[op] = operationId.size();
     });
 
@@ -268,11 +269,12 @@ public:
       DenseSet<Operation *> users;
       getAllAcutalUsersForChannel(TheCh, users);
       // All users are in the same block and in the innermost loop.
+      auto *first = *(users.begin());
       for (auto *user : users) {
-        if (user->getBlock() != src->getBlock())
+        if (user->getBlock() != first->getBlock())
           return false;
       }
-      return isInnermostLoop(src->getParentOfType<scf::ForOp>());
+      return isInnermostLoop(first->getParentOfType<scf::ForOp>());
     };
     for (auto bufferIter : bufferRange) {
       Operation *owner = bufferIter.first->owner;
