@@ -60,6 +60,19 @@ static Channel *findChannelForAlloc(Value value,
   return TheCh;
 }
 
+static void getAllAcutalUsersForChannel(Channel *TheCh,
+                                        DenseSet<Operation *> &users) {
+  Operation *src = TheCh->getSrcOp();
+  SmallVector<Operation *> dsts;
+  TheCh->getDstOps(dsts);
+  users.insert(src);
+  for (auto *op : dsts) {
+    auto actual = getActualConsumers(op);
+    for (auto *tOp : actual)
+      users.insert(tOp);
+  }
+}
+
 static void updateLiveOpsInOneBlock(Channel *TheCh, OperationListT &liveOps) {
   assert(TheCh->channelKind == DataChannelKind::TMEMPost ||
          TheCh->channelKind == DataChannelKind::SMEMPost);
@@ -194,15 +207,7 @@ private:
         static_cast<ChannelPost *>(findChannelForAlloc(value, *channels));
     std::vector<Operation *> liveOps;
     DenseSet<Operation *> users;
-    Operation *src = TheCh->getSrcOp();
-    SmallVector<Operation *> dsts;
-    TheCh->getDstOps(dsts);
-    users.insert(src);
-    for (auto *op : dsts) {
-      auto actual = getActualConsumers(op);
-      for (auto *tOp : actual)
-        users.insert(tOp);
-    }
+    getAllAcutalUsersForChannel(TheCh, users);
     updateLiveOpsAcrossScopes(users, liveOps);
     return liveOps;
   }
@@ -261,15 +266,7 @@ public:
       ChannelPost *TheCh =
           static_cast<ChannelPost *>(findChannelForOp(alloc, *channels));
       DenseSet<Operation *> users;
-      Operation *src = TheCh->getSrcOp();
-      SmallVector<Operation *> dsts;
-      TheCh->getDstOps(dsts);
-      users.insert(src);
-      for (auto *op : dsts) {
-        auto actual = getActualConsumers(op);
-        for (auto *tOp : actual)
-          users.insert(tOp);
-      }
+      getAllAcutalUsersForChannel(TheCh, users);
       // All users are in the same block and in the innermost loop.
       for (auto *user : users) {
         if (user->getBlock() != src->getBlock())
@@ -342,15 +339,7 @@ OperationListT livenessForTmemChannel(Value value,
     handleOperandD(cast<ttng::TMEMAllocOp>(TheCh->getAllocOp()), liveOps);
   } else {
     DenseSet<Operation *> users;
-    Operation *src = TheCh->getSrcOp();
-    SmallVector<Operation *> dsts;
-    TheCh->getDstOps(dsts);
-    users.insert(src);
-    for (auto *op : dsts) {
-      auto actual = getActualConsumers(op);
-      for (auto *tOp : actual)
-        users.insert(tOp);
-    }
+    getAllAcutalUsersForChannel(TheCh, users);
     updateLiveOpsAcrossScopes(users, liveOps);
   }
   return liveOps;
