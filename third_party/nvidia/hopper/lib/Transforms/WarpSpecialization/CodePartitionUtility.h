@@ -155,14 +155,17 @@ struct TmemDataChannel : Channel {
 
 struct TmemDataChannelPost : Channel {
   bool isOperandD;
+  bool isOperandDNoAcc;
   Operation *allocOp;
 
   // Can be produced by tmem_store or operand D of gen5, consumed by tmem_load
   // or gen5
   TmemDataChannelPost(int producer, SmallVector<int> &consumers,
-                      Operation *allocOp, bool isOperandD, unsigned uniqID)
+                      Operation *allocOp, bool isOperandD, bool isOperandDNoAcc,
+                      unsigned uniqID)
       : Channel(producer, consumers, nullptr, 0 /*operandIdx*/, 0, uniqID),
-        isOperandD(isOperandD), allocOp(allocOp) {
+        isOperandD(isOperandD), isOperandDNoAcc(isOperandDNoAcc),
+        allocOp(allocOp) {
     channelKind = DataChannelKind::TMEMPost;
   }
 

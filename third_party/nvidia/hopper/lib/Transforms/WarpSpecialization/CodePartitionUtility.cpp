@@ -563,7 +563,7 @@ static void handleOperandD(ttng::TMEMAllocOp tmemAllocOp,
         auto channelID = channels.size();
         channels.push_back(std::make_unique<ttng::TmemDataChannelPost>(
             producerTaskId, consumerIds, tmemAllocOp.getOperation(),
-            true /*isOperandD*/, channels.size()));
+            true /*isOperandD*/, true, channels.size()));
         // Mark producer and consumer.
         setTmemChannelAttr(currentProd, channelID, "tmem.start");
         setTmemChannelAttr(&op, channelID, "tmem.end");
@@ -580,7 +580,7 @@ static void handleOperandD(ttng::TMEMAllocOp tmemAllocOp,
         auto consumerIds = getAsyncTaskIds(&op);
         channels.push_back(std::make_unique<ttng::TmemDataChannelPost>(
             producerTaskId, consumerIds, tmemAllocOp.getOperation(),
-            true /*isOperandD*/, channels.size()));
+            true /*isOperandD*/, true, channels.size()));
         // Mark producer and consumer.
         setTmemChannelAttr(currentProd, channelID, "tmem.start");
         setTmemChannelAttr(&op, channelID, "tmem.end");
@@ -597,7 +597,7 @@ static void handleOperandD(ttng::TMEMAllocOp tmemAllocOp,
         auto consumerIds = getAsyncTaskIds(&op);
         channels.push_back(std::make_unique<ttng::TmemDataChannelPost>(
             producerTaskId, consumerIds, tmemAllocOp.getOperation(),
-            true /*isOperandD*/, channels.size()));
+            true /*isOperandD*/, true, channels.size()));
         // Mark producer and consumer.
         setTmemChannelAttr(currentProd, channelID, "tmem.start");
         setTmemChannelAttr(&op, channelID, "tmem.end");
@@ -607,7 +607,7 @@ static void handleOperandD(ttng::TMEMAllocOp tmemAllocOp,
         auto consumerIds = getAsyncTaskIds(&op);
         channels.push_back(std::make_unique<ttng::TmemDataChannelPost>(
             -1, consumerIds, tmemAllocOp.getOperation(), true /*isOperandD*/,
-            channels.size()));
+            true, channels.size()));
         // Mark producer and consumer.
         setTmemChannelAttr(&op, channelID, "tmem.end");
       }
@@ -636,7 +636,7 @@ static void handleOperandD(ttng::TMEMAllocOp tmemAllocOp,
       auto consumerIds = getAsyncTaskIds(user);
       channels.push_back(std::make_unique<ttng::TmemDataChannelPost>(
           producerTaskId, consumerIds, tmemAllocOp.getOperation(),
-          true /*isOperandD*/, channels.size()));
+          true /*isOperandD*/, true, channels.size()));
       // Mark producer and consumer.
       setTmemChannelAttr(currentProd, channelID, "tmem.start");
       setTmemChannelAttr(user, channelID, "tmem.end");
@@ -660,6 +660,7 @@ static void createChannelPost(Operation *allocOp, mlir::DominanceInfo &dom,
     }
     return false;
   };
+  bool isOperandDNoAcc = false;
   if (auto tmemAllocOp = dyn_cast<ttng::TMEMAllocOp>(allocOp)) {
     bool isOperandD = false;
     ttng::TCGen5MMAOp mmaOp;
@@ -670,8 +671,10 @@ static void createChannelPost(Operation *allocOp, mlir::DominanceInfo &dom,
           if (!isConstFalse(mmaOpT.useAccumulator())) {
             mmaOp = mmaOpT;
             isOperandD = true;
-          } else
+          } else {
+            isOperandDNoAcc = true;
             producers.push_back(user);
+          }
         } else // other operands are consumers
           consumers.push_back(user);
       } else if (isa<ttng::TMEMStoreOp>(user)) {
@@ -730,7 +733,7 @@ static void createChannelPost(Operation *allocOp, mlir::DominanceInfo &dom,
   if (auto tmemAllocOp = dyn_cast<ttng::TMEMAllocOp>(allocOp))
     channels.push_back(std::make_unique<ttng::TmemDataChannelPost>(
         producerTaskIds.front(), consumerTaskIds, allocOp, false,
-        channels.size()));
+        isOperandDNoAcc, channels.size()));
   else
     channels.push_back(std::make_unique<ChannelPost>(
         producerTaskIds.front(), consumerTaskIds, allocOp, channels.size()));
