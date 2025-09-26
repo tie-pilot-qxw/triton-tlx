@@ -42,19 +42,18 @@ def matmul_tma_set_block_size_hook(nargs):
         nargs["c_desc"].block_shape = [BLOCK_M_SPLIT, BLOCK_N]
 
 
-
 def matmul_get_configs():
     return [
         triton.Config({'BM': BM, 'BN': BN, "BK": BK, "GROUP_SIZE_M": 8, "NUM_STAGES": num_stage,
                 "NUM_MMA_WARPS": 8,
                 "NUM_MMA_GROUPS": 2,
-                "EPILOGUE_SUBTILE": True,}, 
+                "EPILOGUE_SUBTILE": True,},
                       num_stages=0, num_warps=4, pre_hook=matmul_tma_set_block_size_hook) \
-        for BM in [256] \
-        for BN in [128] \
+        for BM, BN in [(128, 256), (256, 128)] \
         for BK in [64] \
         for num_stage in [3, 4]
     ]
+
 
 @triton.autotune(
     # Autotune configs can be reused or adapted
@@ -64,9 +63,13 @@ def matmul_get_configs():
 )
 @triton.jit
 def matmul_kernel_tlx_ws_persistent(
-    a_desc, b_desc, c_desc,
-    M, N, K,
-    NUM_SMS: tl.constexpr, 
+    a_desc,
+    b_desc,
+    c_desc,
+    M,
+    N,
+    K,
+    NUM_SMS: tl.constexpr,
     BM: tl.constexpr,
     BN: tl.constexpr,
     BK: tl.constexpr,
@@ -93,23 +96,23 @@ def matmul_kernel_tlx_ws_persistent(
             num_pid_n = tl.cdiv(N, BN)
             num_tiles = num_pid_m * num_pid_n
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
-            
+
             p = 1
             buf = 0
-            
+
             for tile_id in range(start_pid, num_tiles, NUM_SMS):
                 group_id = tile_id // num_pid_in_group
                 first_pid_m = group_id * GROUP_SIZE_M
                 group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
                 pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
                 pid_n = (tile_id % num_pid_in_group) // group_size_m
-                
+
                 offset_am = pid_m * BM
                 offset_bn = pid_n * BN
 
                 for k in range(0, tl.cdiv(K, BK)):
                     offset_k = k * BK
-                    
+
                     # Async load to a[buf]
                     empty_a_1st = tlx.local_view(bars_empty_a, buf)
                     full_a_1st = tlx.local_view(bars_full_a, buf)
@@ -148,47 +151,44 @@ def matmul_kernel_tlx_ws_persistent(
 
             p = 0
             buf = 0
-            
+
             for tile_id in range(start_pid, num_tiles, NUM_SMS):
                 group_id = tile_id // num_pid_in_group
                 first_pid_m = group_id * GROUP_SIZE_M
                 group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
                 pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
                 pid_n = (tile_id % num_pid_in_group) // group_size_m
-                
+
                 offset_am = pid_m * BM
                 offset_bn = pid_n * BN
-
-                acc = tl.zeros([BM // 2, BN], dtype=tl.float32)
-
                 last_buf = buf
-                full_a = tlx.local_view(bars_full_a, buf + NUM_STAGES * tlx.async_task_replica_id())
+                full_a = tlx.local_view(bars_full_a, buf + NUM_STAGES * cid)
                 full_b = tlx.local_view(bars_full_b, buf)
                 tlx.barrier_wait(bar=full_a, phase=p)
                 tlx.barrier_wait(bar=full_b, phase=p)
 
-                data_a = tlx.local_view(a, buf + NUM_STAGES * tlx.async_task_replica_id())
+                data_a = tlx.local_view(a, buf + NUM_STAGES * cid)
                 data_b = tlx.local_view(b, buf)
 
-                acc = tlx.async_dot(data_a, data_b, acc)
+                acc = tlx.async_dot(data_a, data_b)
 
                 p = p ^ (buf == (NUM_STAGES - 1))
                 buf = (buf + 1) % NUM_STAGES
 
                 for k in range(1, tl.cdiv(K, BK)):
-                    
-                    full_a = tlx.local_view(bars_full_a, buf + NUM_STAGES * tlx.async_task_replica_id())
+
+                    full_a = tlx.local_view(bars_full_a, buf + NUM_STAGES * cid)
                     full_b = tlx.local_view(bars_full_b, buf)
                     tlx.barrier_wait(bar=full_a, phase=p)
                     tlx.barrier_wait(bar=full_b, phase=p)
 
-                    data_a = tlx.local_view(a, buf + NUM_STAGES * tlx.async_task_replica_id())
+                    data_a = tlx.local_view(a, buf + NUM_STAGES * cid)
                     data_b = tlx.local_view(b, buf)
 
                     acc = tlx.async_dot(data_a, data_b, acc)
                     acc = tlx.async_dot_wait(1, acc)
 
-                    empty_a = tlx.local_view(bars_empty_a, last_buf + NUM_STAGES * tlx.async_task_replica_id())
+                    empty_a = tlx.local_view(bars_empty_a, last_buf + NUM_STAGES * cid)
                     empty_b = tlx.local_view(bars_empty_b, last_buf)
                     tlx.barrier_arrive(empty_a)
                     tlx.barrier_arrive(empty_b)
@@ -197,10 +197,10 @@ def matmul_kernel_tlx_ws_persistent(
                     p = p ^ (buf == (NUM_STAGES - 1))
                     buf = (buf + 1) % NUM_STAGES
 
-                offset_cm = offset_am + BLOCK_M_SPLIT * tlx.async_task_replica_id()
+                offset_cm = offset_am + BLOCK_M_SPLIT * cid
 
                 acc = tlx.async_dot_wait(0, acc)
-                empty_a = tlx.local_view(bars_empty_a, last_buf + NUM_STAGES * tlx.async_task_replica_id())
+                empty_a = tlx.local_view(bars_empty_a, last_buf + NUM_STAGES * cid)
                 empty_b = tlx.local_view(bars_empty_b, last_buf)
                 tlx.barrier_arrive(empty_a)
                 tlx.barrier_arrive(empty_b)
@@ -215,6 +215,7 @@ def matmul_kernel_tlx_ws_persistent(
                     c_desc.store([offset_cm, offset_bn + BN // 2], c1)
                 else:
                     c_desc.store([offset_cm, offset_bn], acc.to(tlx.dtype_of(c_desc)))
+
 
 def matmul_tlx_ws_persistent(a, b):
     # Check constraints.
@@ -235,14 +236,19 @@ def matmul_tlx_ws_persistent(a, b):
         num_m_blocks = triton.cdiv(M, META['BM'])
         num_n_blocks = triton.cdiv(N, META['BN'])
         total_blocks = num_m_blocks * num_n_blocks
-        return (min(NUM_SMS, total_blocks),)
+        return (min(NUM_SMS, total_blocks), )
 
     matmul_kernel_tlx_ws_persistent[grid](
-        desc_in_1, desc_in_2, desc_out,
-        M, N, K,
-        NUM_SMS=NUM_SMS, 
+        desc_in_1,
+        desc_in_2,
+        desc_out,
+        M,
+        N,
+        K,
+        NUM_SMS=NUM_SMS,
     )
     return c
+
 
 @pytest.mark.skipif(
     not is_cuda() or torch.cuda.get_device_capability()[0] != 9,
@@ -257,12 +263,16 @@ def test_op():
     b = torch.randn((K, N), dtype=torch.float16, device=DEVICE)
 
     rtol = 1e-2 if is_hip_cdna2() else 0
-    output = matmul_tlx_ws_persistent(a, b,)
+    output = matmul_tlx_ws_persistent(
+        a,
+        b,
+    )
     output_ref = torch.matmul(a, b)
 
     torch.allclose(output, output_ref, atol=1e-2, rtol=rtol)
-    
-    print(f"Test passed!")
+
+    print("Test passed!")
+
 
 TORCH_HAS_FP8 = False
 
@@ -289,6 +299,7 @@ for fp8_inputs in [False, True]:
             args={"fp8_inputs": fp8_inputs},
         ))
 
+
 @triton.testing.perf_report(configs)
 def benchmark(M, N, K, provider, fp8_inputs):
     a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
@@ -299,10 +310,12 @@ def benchmark(M, N, K, provider, fp8_inputs):
         b = b.to(torch.float8_e5m2)
     quantiles = [0.5, 0.2, 0.8]
     if provider == ref_lib.lower():
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles, warmup=200, rep=200)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles, warmup=200,
+                                                     rep=200)
     if provider == 'triton':
-        _ = matmul_tlx_ws_persistent(a, b) # run to compile
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul_tlx_ws_persistent(a, b), quantiles=quantiles, warmup=200, rep=200)
+        _ = matmul_tlx_ws_persistent(a, b)  # run to compile
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul_tlx_ws_persistent(a, b), quantiles=quantiles,
+                                                     warmup=200, rep=200)
     perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
     return perf(ms), perf(max_ms), perf(min_ms)
 
