@@ -47,12 +47,13 @@ def matmul_get_configs():
         triton.Config({'BM': BM, 'BN': BN, "BK": BK, "GROUP_SIZE_M": 8, "NUM_STAGES": num_stage,
                 "NUM_MMA_WARPS": 8,
                 "NUM_MMA_GROUPS": 2,
-                "EPILOGUE_SUBTILE": True,}, 
+                "EPILOGUE_SUBTILE": True, "USE_NAMED_BARRIER": named_barrier},
                       num_stages=0, num_warps=4, pre_hook=matmul_tma_set_block_size_hook) \
         for BM in [128] \
         for BN in [128] \
         for BK in [64] \
-        for num_stage in [4, 5, 6]
+        for num_stage in [6] \
+        for named_barrier in [True, False]
     ]
 
 @triton.autotune(
@@ -74,6 +75,7 @@ def matmul_kernel_tlx_ws_persistent(
     NUM_MMA_WARPS: tl.constexpr,
     NUM_MMA_GROUPS: tl.constexpr,
     EPILOGUE_SUBTILE: tl.constexpr,
+    USE_NAMED_BARRIER: tl.constexpr,
 ):
     a = tlx.local_alloc((BM, BK), tlx.dtype_of(a_desc), NUM_STAGES)
     b = tlx.local_alloc((BK, BN), tlx.dtype_of(b_desc), NUM_STAGES)
@@ -93,23 +95,23 @@ def matmul_kernel_tlx_ws_persistent(
             num_pid_n = tl.cdiv(N, BN)
             num_tiles = num_pid_m * num_pid_n
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
-            
+
             p = 1
             buf = 0
-            
+
             for tile_id in range(start_pid, num_tiles, NUM_SMS):
                 group_id = tile_id // num_pid_in_group
                 first_pid_m = group_id * GROUP_SIZE_M
                 group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
                 pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
                 pid_n = (tile_id % num_pid_in_group) // group_size_m
-                
+
                 offset_am = pid_m * BM
                 offset_bn = pid_n * BN
 
                 for k in range(0, tl.cdiv(K, BK)):
                     offset_k = k * BK
-                    
+
                     # Async load to a[buf] and b[buf]
                     empty = tlx.local_view(mainloop_empty_bar, buf)
                     full = tlx.local_view(mainloop_full_bar, buf)
@@ -140,6 +142,10 @@ def matmul_kernel_tlx_ws_persistent(
             mma_bar = tlx.local_view(pingpong_mma_bar, 0)
             epi_bar = tlx.local_view(pingpong_epi_bar, 0)
 
+            if cid == 1 and USE_NAMED_BARRIER:
+                # Consumer 1 arrives at barrier 9 to unblock Consumer 0 at the beginning.
+                tlx.named_barrier_arrive(9, 256)
+
             for tile_id in range(start_pid, num_tiles, NUM_SMS * 2):
                 total_k_offset = tile_rank * k_tiles
                 tile_rank += 2
@@ -153,14 +159,20 @@ def matmul_kernel_tlx_ws_persistent(
                 group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
                 pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
                 pid_n = (tile_id % num_pid_in_group) // group_size_m
-                
+
                 offset_am = pid_m * BM
                 offset_bn = pid_n * BN
 
                 acc = tl.zeros([BM, BN], dtype=tl.float32)
 
                 # wait ping-pong barrier
-                tlx.barrier_wait(bar=mma_bar, phase=phase_mma)
+                if USE_NAMED_BARRIER:
+                    if cid == 0:
+                        tlx.named_barrier_wait(9, 256)
+                    else:
+                        tlx.named_barrier_wait(10, 256)
+                else:
+                    tlx.barrier_wait(bar=mma_bar, phase=phase_mma)
 
                 # round 0
                 full = tlx.local_view(mainloop_full_bar, buf)
@@ -174,7 +186,7 @@ def matmul_kernel_tlx_ws_persistent(
                 p = p ^ (buf == (NUM_STAGES - 1))
                 buf = (buf + 1) % NUM_STAGES
 
-                for k in range(1, k_tiles):                    
+                for k in range(1, k_tiles):
                     full = tlx.local_view(mainloop_full_bar, buf)
                     tlx.barrier_wait(bar=full, phase=p)
 
@@ -192,12 +204,22 @@ def matmul_kernel_tlx_ws_persistent(
                     p = p ^ (buf == (NUM_STAGES - 1))
                     buf = (buf + 1) % NUM_STAGES
 
-                tlx.barrier_arrive(mma_bar) # release mma bar
+                if USE_NAMED_BARRIER:
+                    if cid == 0:
+                        # After issuing async_dot, Consumer 0 signals barrier 10 to unblock Consumer 1.
+                        tlx.named_barrier_arrive(10, 256)
+                    else:
+                        # After issuing async_dot, Consumer 1 signals barrier 9 to unblock Consumer 0.
+                        tlx.named_barrier_arrive(9, 256)
+                else:
+                    tlx.barrier_arrive(mma_bar) # release mma bar
+
                 acc = tlx.async_dot_wait(0, acc) # wait for last round
                 empty = tlx.local_view(mainloop_empty_bar, last_buf)
                 tlx.barrier_arrive(empty)
 
-                tlx.barrier_wait(bar=epi_bar, phase=phase_epi)
+                if not USE_NAMED_BARRIER:
+                    tlx.barrier_wait(bar=epi_bar, phase=phase_epi)
 
                 offset_cm = offset_am
                 if EPILOGUE_SUBTILE:
@@ -211,7 +233,8 @@ def matmul_kernel_tlx_ws_persistent(
                 else:
                     c_desc.store([offset_cm, offset_bn], acc.to(tlx.dtype_of(c_desc)))
 
-                tlx.barrier_arrive(epi_bar)
+                if not USE_NAMED_BARRIER:
+                    tlx.barrier_arrive(epi_bar)
 
 def matmul_tlx_ws_persistent(a, b, profile=False):
     # Check constraints.
@@ -260,7 +283,7 @@ def test_op():
     torch.allclose(output, output_ref, atol=1e-2, rtol=rtol)
 
     output = matmul_tlx_ws_persistent(a, b, True)
-    
+
     print(f"Test passed!")
 
 TORCH_HAS_FP8 = False
